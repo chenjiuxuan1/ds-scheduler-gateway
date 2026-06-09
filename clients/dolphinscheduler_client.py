@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from datetime import datetime
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -139,6 +140,8 @@ class DolphinSchedulerClient:
 
     def trigger_workflow(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
+        schedule_time = payload.get("schedule_time", "")
+        launched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         form = {
             "failureStrategy": "CONTINUE",
             "warningType": "NONE",
@@ -151,7 +154,6 @@ class DolphinSchedulerClient:
             "runMode": "RUN_MODE_SERIAL",
             "execType": "START_PROCESS",
             "dryRun": "0",
-            "scheduleTime": payload.get("schedule_time", ""),
         }
         if payload.get("start_node_list"):
             form["startNodeList"] = payload["start_node_list"]
@@ -164,6 +166,9 @@ class DolphinSchedulerClient:
             attempt_form.pop("processDefinitionCode", None)
             attempt_form.pop("workflowDefinitionCode", None)
             attempt_form[code_field] = payload.get("workflow_code")
+            attempt_form["scheduleTime"] = (
+                schedule_time if schedule_time else launched_at
+            ) if endpoint_name == "start-workflow-instance" else schedule_time
 
             ok, result = self.request(
                 "POST",
