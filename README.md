@@ -21,6 +21,7 @@
 - `trigger_workflow`
 - `list_instances`
 - `get_instance`
+- `append_sql_task`
 
 ## 目录结构
 
@@ -172,3 +173,40 @@ ssh -p 36000 root@<pk-host> "cd /root/ds-scheduler-gateway && python3 scripts/ds
    - 上下线 schedule
    - 停止实例
    - 查询任务节点详情
+
+## 新增 SQL 任务
+
+`append_sql_task` 会先读取当前工作流定义，然后：
+
+1. 自动寻找当前工作流中的一个 SQL 节点作为模板
+2. 继承它的 datasource / tenant / worker / environment 等运行参数
+3. 追加一个新的 SQL 任务节点
+4. 默认把新节点挂到当前 DAG 的尾节点后面
+5. 如果工作流原本是 `ONLINE`，会先下线、更新，再恢复上线
+
+推荐 payload：
+
+```json
+{
+  "project_code": "19427088052704",
+  "workflow_code": "174599383687393",
+  "task_name": "测试2",
+  "sql": "select 2",
+  "template_task_name": "dwd_okr_dashboard"
+}
+```
+
+说明：
+
+- `task_name`: 新任务名，必填
+- `sql`: 新 SQL 文本，必填
+- `template_task_name`: 可选。建议显式指定一个现有 SQL 节点名，避免模板选择错误
+- `restore_online`: 可选，默认 `true`
+- `auto_offline`: 可选，默认 `true`
+- `sql_type`: 可选。查询通常传 `0`，非查询传 `1`
+
+示例 base64 原文：
+
+```json
+{"project_code":"19427088052704","workflow_code":"174599383687393","task_name":"测试2","sql":"select 2","template_task_name":"dwd_okr_dashboard"}
+```
