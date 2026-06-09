@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -115,6 +116,18 @@ class DolphinSchedulerClient:
             return "processDefinitionCode"
         return field
 
+    def _candidate_start_modes(self) -> list[tuple[str, str]]:
+        endpoint = (self.config.start_endpoint or "auto").strip()
+        field = (self.config.start_code_field or "auto").strip()
+
+        if endpoint not in ("", "auto") or field not in ("", "auto"):
+            return [(self._resolve_start_endpoint(), self._resolve_start_code_field())]
+
+        return [
+            ("start-process-instance", "processDefinitionCode"),
+            ("start-workflow-instance", "workflowDefinitionCode"),
+        ]
+
     def release_workflow(self, payload: Dict[str, Any], release_state: str) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
         workflow_code = payload.get("workflow_code")
@@ -126,7 +139,6 @@ class DolphinSchedulerClient:
 
     def trigger_workflow(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
-        start_code_field = self._resolve_start_code_field()
         form = {
             "failureStrategy": "CONTINUE",
             "warningType": "NONE",
@@ -141,18 +153,34 @@ class DolphinSchedulerClient:
             "dryRun": "0",
             "scheduleTime": payload.get("schedule_time", ""),
         }
-        form[start_code_field] = payload.get("workflow_code")
         if payload.get("start_node_list"):
             form["startNodeList"] = payload["start_node_list"]
         custom_params = payload.get("custom_params") or {}
         if custom_params:
             form["startParams"] = json.dumps(custom_params, ensure_ascii=False)
+        attempts = []
+        for endpoint_name, code_field in self._candidate_start_modes():
+            attempt_form = deepcopy(form)
+            attempt_form.pop("processDefinitionCode", None)
+            attempt_form.pop("workflowDefinitionCode", None)
+            attempt_form[code_field] = payload.get("workflow_code")
 
-        return self.request(
-            "POST",
-            f"/projects/{project_code}/executors/{self._resolve_start_endpoint()}",
-            form=form,
-        )
+            ok, result = self.request(
+                "POST",
+                f"/projects/{project_code}/executors/{endpoint_name}",
+                form=attempt_form,
+            )
+            if ok:
+                return True, result
+            attempts.append(
+                {
+                    "endpoint": endpoint_name,
+                    "code_field": code_field,
+                    "result": result,
+                }
+            )
+
+        return False, {"message": "all trigger attempts failed", "attempts": attempts}
 
     def list_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
