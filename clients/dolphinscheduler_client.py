@@ -91,6 +91,18 @@ class DolphinSchedulerClient:
                 return True, item
         return False, {"message": f"workflow not found by name: {workflow_name}"}
 
+    def _resolve_start_endpoint(self) -> str:
+        endpoint = (self.config.start_endpoint or "auto").strip()
+        if endpoint in ("", "auto"):
+            return "start-process-instance"
+        return endpoint
+
+    def _resolve_start_code_field(self) -> str:
+        field = (self.config.start_code_field or "auto").strip()
+        if field in ("", "auto"):
+            return "processDefinitionCode"
+        return field
+
     def release_workflow(self, payload: Dict[str, Any], release_state: str) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
         workflow_code = payload.get("workflow_code")
@@ -102,8 +114,8 @@ class DolphinSchedulerClient:
 
     def trigger_workflow(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
+        start_code_field = self._resolve_start_code_field()
         form = {
-            "processDefinitionCode": payload.get("workflow_code"),
             "failureStrategy": "CONTINUE",
             "warningType": "NONE",
             "warningGroupId": "0",
@@ -117,6 +129,7 @@ class DolphinSchedulerClient:
             "dryRun": "0",
             "scheduleTime": payload.get("schedule_time", ""),
         }
+        form[start_code_field] = payload.get("workflow_code")
         if payload.get("start_node_list"):
             form["startNodeList"] = payload["start_node_list"]
         custom_params = payload.get("custom_params") or {}
@@ -125,7 +138,7 @@ class DolphinSchedulerClient:
 
         return self.request(
             "POST",
-            f"/projects/{project_code}/executors/start-process-instance",
+            f"/projects/{project_code}/executors/{self._resolve_start_endpoint()}",
             form=form,
         )
 

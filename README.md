@@ -74,6 +74,35 @@ config/countries.json
 export DS_COUNTRIES_CONFIG=/root/ds-scheduler-gateway/config/countries.json
 ```
 
+`countries.json` 当前已经预置了 6 个国家的基础配置：
+
+- `cn`
+- `ine`
+- `mx`
+- `ph`
+- `pk`
+- `th`
+
+其中 `trigger_workflow` 依赖的 `environment_code` / `tenant_code` / `start_endpoint` / `start_code_field`
+也已经预置到统一配置里，便于按国家兜底。
+
+## 当前内置国家配置来源
+
+这些值来自各国现有 `Intelligent-Alarm-Repair-Assistant` 仓库中的运行配置：
+
+- `cn`: `DS_BASE_URL=http://172.20.0.235:12345/dolphinscheduler`
+- `ine`: `DS_BASE_URL=http://192.168.21.236:12345/dolphinscheduler`
+- `mx`: `DS_BASE_URL=http://172.20.220.165:12345/dolphinscheduler`
+- `ph`: `DS_BASE_URL=http://127.0.0.1:12345/dolphinscheduler`
+- `pk`: `DS_BASE_URL=http://10.20.84.176:12345/dolphinscheduler`
+- `th`: `DS_BASE_URL=http://192.168.20.236:12345/dolphinscheduler`
+
+说明：
+
+- `ph` 的 DS 地址是 `127.0.0.1`，意味着网关脚本需要部署在菲律宾目标机本机执行
+- `pk` 的 `trigger_workflow` 使用 `start-workflow-instance` + `workflowDefinitionCode`
+- 其余国家当前按 DS 3.4 标准 `start-process-instance` + `processDefinitionCode` 处理
+
 ## 本地示例
 
 ```bash
@@ -91,14 +120,44 @@ cd /root/ds-scheduler-gateway && python3 scripts/ds_scheduler_entry.py \
 ssh -p 36000 root@10.20.47.14 "cd /root/ds-scheduler-gateway && python3 scripts/ds_scheduler_entry.py --country cn --action '{{$json.action}}' --ds-token '{{$json.ds_token}}' --request-id '{{$json.request_id}}' --payload-b64 '{{$json.payload_b64}}'"
 ```
 
+## n8n 多国家命令模板
+
+把下面命令中的 SSH 主机替换成各国真实目标机即可：
+
+```bash
+ssh -p <port> root@<country-host> "cd /root/ds-scheduler-gateway && python3 scripts/ds_scheduler_entry.py --country <country> --action '{{$json.action}}' --ds-token '{{$json.ds_token}}' --request-id '{{$json.request_id}}' --payload-b64 '{{$json.payload_b64}}'"
+```
+
+示例：
+
+- 中国：
+
+```bash
+ssh -p 36000 root@10.20.47.14 "cd /root/ds-scheduler-gateway && python3 scripts/ds_scheduler_entry.py --country cn --action '{{$json.action}}' --ds-token '{{$json.ds_token}}' --request-id '{{$json.request_id}}' --payload-b64 '{{$json.payload_b64}}'"
+```
+
+- 泰国：
+
+```bash
+ssh -p 36000 root@192.168.20.236 "cd /root/ds-scheduler-gateway && python3 scripts/ds_scheduler_entry.py --country th --action '{{$json.action}}' --ds-token '{{$json.ds_token}}' --request-id '{{$json.request_id}}' --payload-b64 '{{$json.payload_b64}}'"
+```
+
+- 巴基斯坦：
+
+```bash
+ssh -p 36000 root@<pk-host> "cd /root/ds-scheduler-gateway && python3 scripts/ds_scheduler_entry.py --country pk --action '{{$json.action}}' --ds-token '{{$json.ds_token}}' --request-id '{{$json.request_id}}' --payload-b64 '{{$json.payload_b64}}'"
+```
+
 ## 落地建议
 
 第一版建议：
 
-1. 先在中国机器部署并跑通
-2. 补齐 `countries.json`
+1. 先把 `scaffold` 部署到 6 个国家实际执行机
+2. 按国家校验 `countries.json` 中的 `environment_code` / `tenant_code`
 3. 在 n8n 中把每个国家分支接到对应跳板机命令
-4. 后续再扩展：
+4. 逐个国家先测 `list_workflows`
+5. 再统一回归测试 `trigger_workflow`
+6. 后续再扩展：
    - 创建工作流
    - 更新工作流定义
    - 上下线 schedule

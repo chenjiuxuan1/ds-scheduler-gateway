@@ -13,6 +13,9 @@ class CountryConfig:
     worker_group: str = "default"
     environment_code: str = ""
     queue: str = ""
+    api_mode: str = "auto"
+    start_endpoint: str = "auto"
+    start_code_field: str = "auto"
 
 
 @dataclass
