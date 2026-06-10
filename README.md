@@ -184,6 +184,7 @@ ssh -p 36000 root@<pk-host> "cd /root/ds-scheduler-gateway && python3 scripts/ds
 3. 追加一个新的 SQL 任务节点
 4. 默认把新节点挂到模板节点后面；也支持显式指定上游节点
 5. 更新完成后会恢复到工作流原来的发布状态
+6. 如果原工作流存在已上线的定时配置，也会恢复到原来的定时上线状态
 
 推荐 payload：
 

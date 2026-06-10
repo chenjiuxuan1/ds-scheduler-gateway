@@ -174,6 +174,19 @@ class DolphinSchedulerClient:
             query={"releaseState": release_state},
         )
 
+    def release_schedule(
+        self,
+        payload: Dict[str, Any],
+        schedule_id: str | int,
+        release_state: str,
+    ) -> Tuple[bool, Any]:
+        project_code = payload.get("project_code") or self.config.project_code
+        return self.request(
+            "POST",
+            f"/projects/{project_code}/schedules/{schedule_id}/release",
+            query={"releaseState": release_state},
+        )
+
     def trigger_workflow(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
         schedule_time = payload.get("schedule_time", "")
@@ -324,15 +337,17 @@ class DolphinSchedulerClient:
             payload=payload,
         )
 
-        original_release_state = str(
-            workflow_meta.get("releaseState")
-            or workflow_meta.get("scheduleReleaseState")
-            or workflow_meta.get("release_state")
+        original_release_state = str(workflow_meta.get("releaseState") or "").upper()
+        original_schedule_release_state = str(
+            workflow_meta.get("scheduleReleaseState")
+            or detail.get("scheduleReleaseState")
             or ""
         ).upper()
+        original_schedule_id = self._get_schedule_id(detail)
         restore_original_state = payload.get("restore_original_state", payload.get("restore_online", True))
         auto_offline = payload.get("auto_offline", True)
         was_online = original_release_state == "ONLINE"
+        was_schedule_online = original_schedule_release_state == "ONLINE"
 
         if was_online and auto_offline:
             ok, offline_result = self.release_workflow(
@@ -375,6 +390,24 @@ class DolphinSchedulerClient:
                     "original_release_state": original_release_state,
                 }
 
+        restore_schedule_result = None
+        if was_schedule_online and restore_original_state and original_schedule_id:
+            restore_schedule_ok, restore_schedule_result = self.release_schedule(
+                {"project_code": project_code},
+                original_schedule_id,
+                "ONLINE",
+            )
+            if not restore_schedule_ok:
+                return False, {
+                    "message": "workflow updated but failed to restore original schedule release state",
+                    "update_result": update_result,
+                    "restore_result": restore_result,
+                    "restore_schedule_result": restore_schedule_result,
+                    "original_release_state": original_release_state,
+                    "original_schedule_release_state": original_schedule_release_state,
+                    "schedule_id": original_schedule_id,
+                }
+
         return True, {
             "workflow_code": workflow_code,
             "project_code": project_code,
@@ -383,9 +416,15 @@ class DolphinSchedulerClient:
             "task_type": task_type,
             "template_task_name": template.get("name"),
             "original_release_state": original_release_state,
+            "original_schedule_release_state": original_schedule_release_state,
+            "schedule_id": original_schedule_id,
             "restored_original_state": bool(was_online and restore_original_state),
+            "restored_original_schedule_state": bool(
+                was_schedule_online and restore_original_state and original_schedule_id
+            ),
             "update_result": update_result,
             "restore_result": restore_result,
+            "restore_schedule_result": restore_schedule_result,
         }
 
     def _update_workflow_definition(
@@ -457,8 +496,11 @@ class DolphinSchedulerClient:
             "taskDefinitionJson": json.dumps(task_definitions, ensure_ascii=False),
             "executionType": execution_type,
         }
-        if payload.get("schedule_json") is not None:
-            form["schedule"] = payload["schedule_json"]
+        schedule_value = payload.get("schedule_json")
+        if schedule_value is None:
+            schedule_value = self._get_workflow_schedule(workflow_detail)
+        if schedule_value not in ("", None, []):
+            form["schedule"] = self._normalize_schedule_form_value(schedule_value)
         return form
 
     def _unwrap_workflow_detail(self, workflow_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -534,6 +576,35 @@ class DolphinSchedulerClient:
             "locationsObject",
         )
 
+    def _get_workflow_schedule(self, detail: Dict[str, Any]) -> Any:
+        for source in (detail, detail.get("workflowDefinition") or {}):
+            if not isinstance(source, dict):
+                continue
+            if source.get("schedule") not in (None, ""):
+                return source.get("schedule")
+        return None
+
+    def _get_schedule_id(self, detail: Dict[str, Any]) -> str:
+        schedule = self._get_workflow_schedule(detail)
+        candidates: list[Any] = []
+        if isinstance(schedule, dict):
+            candidates.extend([schedule.get("id"), schedule.get("scheduleId")])
+        elif isinstance(schedule, list):
+            for item in schedule:
+                if isinstance(item, dict):
+                    candidates.extend([item.get("id"), item.get("scheduleId")])
+        candidates.extend(
+            [
+                detail.get("scheduleId"),
+                (detail.get("workflowDefinition") or {}).get("scheduleId"),
+            ]
+        )
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if value:
+                return value
+        return ""
+
     def _extract_json_list(self, source: Dict[str, Any], *keys: str) -> list[Dict[str, Any]]:
         for key in keys:
             if key not in source:
@@ -556,6 +627,11 @@ class DolphinSchedulerClient:
                 except json.JSONDecodeError:
                     continue
         return deepcopy(default)
+
+    def _normalize_schedule_form_value(self, schedule_value: Any) -> str:
+        if isinstance(schedule_value, str):
+            return schedule_value
+        return json.dumps(schedule_value, ensure_ascii=False)
 
     def _find_template_task(
         self,
