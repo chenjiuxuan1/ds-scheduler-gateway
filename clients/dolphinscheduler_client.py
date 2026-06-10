@@ -198,11 +198,25 @@ class DolphinSchedulerClient:
         release_state: str,
     ) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
-        return self.request(
-            "POST",
-            f"/projects/{project_code}/schedules/{schedule_id}/release",
-            query={"releaseState": release_state},
-        )
+        path = f"/projects/{project_code}/schedules/{schedule_id}/release"
+        attempts = []
+        for method in ("POST", "PUT"):
+            ok, result = self.request(
+                method,
+                path,
+                query={"releaseState": release_state},
+            )
+            if ok:
+                return True, result
+            attempts.append({"method": method, "result": result})
+            status = result.get("status") if isinstance(result, dict) else None
+            if status not in (405, 404):
+                break
+        return False, {
+            "message": "all schedule release attempts failed",
+            "path": path,
+            "attempts": attempts,
+        }
 
     def trigger_workflow(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
