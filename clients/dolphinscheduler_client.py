@@ -268,6 +268,149 @@ class DolphinSchedulerClient:
         payload = {**payload, "task_type": payload.get("task_type") or "SHELL"}
         return self.append_task(payload)
 
+    def delete_task(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        workflow_code = str(payload.get("workflow_code") or "").strip()
+        task_name = str(payload.get("task_name") or "").strip()
+        task_code = self._safe_int(payload.get("task_code"))
+        if not workflow_code:
+            return False, {"message": "workflow_code is required"}
+        if not task_name and task_code <= 0:
+            return False, {"message": "task_name or task_code is required"}
+
+        ok, workflow_result = self.request(
+            "GET",
+            f"/projects/{project_code}/workflow-definition/{workflow_code}",
+        )
+        if not ok:
+            return False, workflow_result
+
+        detail = self._unwrap_workflow_detail(workflow_result)
+        if not detail:
+            return False, {"message": "workflow detail payload is empty", "raw": workflow_result}
+
+        task_definitions = self._get_workflow_task_definitions(detail)
+        task_relations = self._get_workflow_task_relations(detail)
+        locations = self._get_workflow_locations(detail)
+        workflow_meta = self._get_workflow_meta(detail)
+
+        target_task = self._find_task(task_definitions, task_name=task_name, task_code=task_code)
+        if not target_task:
+            return False, {
+                "message": "task not found",
+                "task_name": task_name,
+                "task_code": task_code if task_code > 0 else "",
+            }
+
+        delete_task_code = self._safe_int(target_task.get("code"))
+        delete_task_name = str(target_task.get("name") or "").strip()
+
+        updated_task_definitions = [
+            deepcopy(item)
+            for item in task_definitions
+            if self._safe_int(item.get("code")) != delete_task_code
+        ]
+        updated_locations = [
+            deepcopy(item)
+            for item in locations
+            if self._safe_int(item.get("taskCode")) != delete_task_code
+        ]
+        updated_relations = self._remove_task_relations(
+            task_relations=task_relations,
+            task_definitions=task_definitions,
+            delete_task_code=delete_task_code,
+            project_code=project_code,
+            workflow_code=workflow_code,
+        )
+
+        original_release_state = str(workflow_meta.get("releaseState") or "").upper()
+        original_schedule_release_state = str(
+            workflow_meta.get("scheduleReleaseState")
+            or detail.get("scheduleReleaseState")
+            or ""
+        ).upper()
+        original_schedule_id = self._get_schedule_id(detail)
+        restore_original_state = payload.get("restore_original_state", payload.get("restore_online", True))
+        auto_offline = payload.get("auto_offline", True)
+        was_online = original_release_state == "ONLINE"
+        was_schedule_online = original_schedule_release_state == "ONLINE"
+
+        if was_online and auto_offline:
+            ok, offline_result = self.release_workflow(
+                {"project_code": project_code, "workflow_code": workflow_code},
+                "OFFLINE",
+            )
+            if not ok:
+                return False, {
+                    "message": "failed to offline workflow before update",
+                    "detail": offline_result,
+                }
+
+        update_form = self._build_workflow_update_form(
+            workflow_detail=detail,
+            payload=payload,
+            task_definitions=updated_task_definitions,
+            task_relations=updated_relations,
+            locations=updated_locations,
+        )
+        ok, update_result = self._update_workflow_definition(project_code, workflow_code, update_form)
+        if not ok:
+            return False, update_result
+        if not self._is_ds_success(update_result):
+            return False, {
+                "message": "workflow update rejected by dolphinscheduler",
+                "result": update_result,
+            }
+
+        restore_result = None
+        if was_online and restore_original_state:
+            restore_ok, restore_result = self.release_workflow(
+                {"project_code": project_code, "workflow_code": workflow_code},
+                "ONLINE",
+            )
+            if not restore_ok:
+                return False, {
+                    "message": "workflow updated but failed to restore original release state",
+                    "update_result": update_result,
+                    "restore_result": restore_result,
+                    "original_release_state": original_release_state,
+                }
+
+        restore_schedule_result = None
+        if was_schedule_online and restore_original_state and original_schedule_id:
+            restore_schedule_ok, restore_schedule_result = self.release_schedule(
+                {"project_code": project_code},
+                original_schedule_id,
+                "ONLINE",
+            )
+            if not restore_schedule_ok:
+                return False, {
+                    "message": "workflow updated but failed to restore original schedule release state",
+                    "update_result": update_result,
+                    "restore_result": restore_result,
+                    "restore_schedule_result": restore_schedule_result,
+                    "original_release_state": original_release_state,
+                    "original_schedule_release_state": original_schedule_release_state,
+                    "schedule_id": original_schedule_id,
+                }
+
+        return True, {
+            "workflow_code": workflow_code,
+            "project_code": project_code,
+            "task_name": delete_task_name,
+            "task_code": delete_task_code,
+            "original_release_state": original_release_state,
+            "original_schedule_release_state": original_schedule_release_state,
+            "schedule_id": original_schedule_id,
+            "restored_original_state": bool(was_online and restore_original_state),
+            "restored_original_schedule_state": bool(
+                was_schedule_online and restore_original_state and original_schedule_id
+            ),
+            "update_result": update_result,
+            "restore_result": restore_result,
+            "restore_schedule_result": restore_schedule_result,
+        }
+
     def append_task(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = str(payload.get("project_code") or self.config.project_code).strip()
         workflow_code = str(payload.get("workflow_code") or "").strip()
@@ -576,6 +719,20 @@ class DolphinSchedulerClient:
             "locationsObject",
         )
 
+    def _find_task(
+        self,
+        task_definitions: Iterable[Dict[str, Any]],
+        task_name: str = "",
+        task_code: int = 0,
+    ) -> Dict[str, Any] | None:
+        normalized_name = str(task_name or "").strip()
+        for item in task_definitions:
+            if task_code > 0 and self._safe_int(item.get("code")) == task_code:
+                return deepcopy(item)
+            if normalized_name and str(item.get("name", "")).strip() == normalized_name:
+                return deepcopy(item)
+        return None
+
     def _get_workflow_schedule(self, detail: Dict[str, Any]) -> Any:
         for source in (detail, detail.get("workflowDefinition") or {}):
             if not isinstance(source, dict):
@@ -751,6 +908,62 @@ class DolphinSchedulerClient:
             updated.append(relation)
         return updated
 
+    def _remove_task_relations(
+        self,
+        task_relations: list[Dict[str, Any]],
+        task_definitions: list[Dict[str, Any]],
+        delete_task_code: int,
+        project_code: str,
+        workflow_code: str,
+    ) -> list[Dict[str, Any]]:
+        predecessors: list[int] = []
+        successors: list[int] = []
+        preserved_relations: list[Dict[str, Any]] = []
+
+        for relation in task_relations:
+            pre_code = self._safe_int(relation.get("preTaskCode"))
+            post_code = self._safe_int(relation.get("postTaskCode"))
+            if post_code == delete_task_code:
+                predecessors.append(pre_code)
+                continue
+            if pre_code == delete_task_code:
+                successors.append(post_code)
+                continue
+            preserved_relations.append(deepcopy(relation))
+
+        predecessors = self._dedupe_ints(predecessors)
+        successors = self._dedupe_ints(successors)
+        existing_codes = [self._safe_int(item.get("code")) for item in preserved_relations]
+        existing_pairs = {
+            (self._safe_int(item.get("preTaskCode")), self._safe_int(item.get("postTaskCode")))
+            for item in preserved_relations
+        }
+
+        skeleton = deepcopy(task_relations[0]) if task_relations else {}
+        for predecessor in predecessors:
+            for successor in successors:
+                if predecessor == successor:
+                    continue
+                pair = (predecessor, successor)
+                if pair in existing_pairs:
+                    continue
+                relation = deepcopy(skeleton)
+                relation["name"] = ""
+                relation["projectCode"] = self._safe_int(project_code)
+                relation["processDefinitionCode"] = self._safe_int(workflow_code)
+                relation["preTaskCode"] = predecessor
+                relation["preTaskVersion"] = 1 if predecessor == 0 else self._find_task_version(task_definitions, predecessor)
+                relation["postTaskCode"] = successor
+                relation["postTaskVersion"] = self._find_task_version(task_definitions, successor)
+                relation["conditionType"] = relation.get("conditionType", 0)
+                relation["conditionParams"] = relation.get("conditionParams", {})
+                relation["code"] = self._next_code(existing_codes)
+                existing_codes.append(relation["code"])
+                existing_pairs.add(pair)
+                preserved_relations.append(relation)
+
+        return preserved_relations
+
     def _resolve_upstream_codes(
         self,
         task_relations: list[Dict[str, Any]],
@@ -864,6 +1077,17 @@ class DolphinSchedulerClient:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    def _dedupe_ints(self, values: Iterable[int]) -> list[int]:
+        seen: set[int] = set()
+        result: list[int] = []
+        for value in values:
+            normalized = self._safe_int(value)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
 
     def _next_code(self, existing_codes: Iterable[int]) -> int:
         current_max = max((code for code in existing_codes if code > 0), default=0)

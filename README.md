@@ -21,7 +21,10 @@
 - `trigger_workflow`
 - `list_instances`
 - `get_instance`
+- `append_task`
 - `append_sql_task`
+- `append_shell_task`
+- `delete_task`
 - `dump_workflow_graph`
 
 ## 目录结构
