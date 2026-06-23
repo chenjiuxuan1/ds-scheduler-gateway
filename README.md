@@ -25,6 +25,7 @@
 - `append_task`
 - `append_sql_task`
 - `append_shell_task`
+- `disable_task`
 - `disable_tasks_except`
 - `delete_task`
 - `dump_workflow_graph`
