@@ -1006,35 +1006,40 @@ class DolphinSchedulerClient:
         task_relations: list[Dict[str, Any]],
         locations: list[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        workflow_meta = self._get_workflow_meta(workflow_detail)
         name = (
             payload.get("workflow_name")
-            or self._get_workflow_meta(workflow_detail).get("name")
+            or workflow_meta.get("name")
             or ""
         )
         description = (
             payload.get("description")
             if payload.get("description") is not None
-            else workflow_detail.get("description", "")
+            else (
+                workflow_meta.get("description")
+                if workflow_meta.get("description") is not None
+                else workflow_detail.get("description", "")
+            )
         )
         global_params = self._normalize_json_value(
+            workflow_meta.get("globalParams"),
+            workflow_meta.get("globalParamList"),
             workflow_detail.get("globalParams"),
             workflow_detail.get("globalParamList"),
             default=[],
         )
         timeout = payload.get("timeout")
         if timeout in ("", None):
-            timeout = (
-                self._get_workflow_meta(workflow_detail).get("timeout")
-                or 0
-            )
+            timeout = workflow_meta.get("timeout") or 0
         tenant_code = (
             payload.get("tenant_code")
+            or workflow_meta.get("tenantCode")
             or workflow_detail.get("tenantCode")
             or self.config.tenant_code
         )
         execution_type = (
             payload.get("execution_type")
-            or self._get_workflow_meta(workflow_detail).get("executionType")
+            or workflow_meta.get("executionType")
             or "PARALLEL"
         )
 
