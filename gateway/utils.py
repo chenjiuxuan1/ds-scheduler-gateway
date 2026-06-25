@@ -25,6 +25,8 @@ SUPPORTED_ACTIONS = {
     "trigger_workflow",
     "list_instances",
     "get_instance",
+    "list_task_instances",
+    "get_task_log",
     "retry_instance",
     "append_task",
     "append_sql_task",

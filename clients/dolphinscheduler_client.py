@@ -476,6 +476,115 @@ class DolphinSchedulerClient:
             query=query,
         )
 
+    def list_task_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        project_code = payload.get("project_code") or self.config.project_code
+        process_instance_id = (
+            payload.get("process_instance_id")
+            or payload.get("instance_id")
+            or payload.get("workflow_instance_id")
+        )
+        query = {
+            "pageNo": payload.get("page_no", 1),
+            "pageSize": payload.get("page_size", 100),
+            "processInstanceId": process_instance_id,
+            "stateType": payload.get("state_type", ""),
+            "searchVal": payload.get("search_val", ""),
+        }
+        return self.request(
+            "GET",
+            f"/projects/{project_code}/task-instances",
+            query=query,
+        )
+
+    def get_task_log(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        if not project_code:
+            return False, {"message": "project_code is required"}
+
+        task_instance = None
+        task_instance_id = self._safe_int(payload.get("task_instance_id"))
+        if task_instance_id > 0:
+            task_instance = {
+                "id": task_instance_id,
+                "taskInstanceId": task_instance_id,
+                "processInstanceId": self._safe_int(
+                    payload.get("process_instance_id") or payload.get("instance_id")
+                ),
+                "name": str(payload.get("task_name") or "").strip(),
+                "taskCode": self._safe_int(payload.get("task_code")),
+                "state": str(payload.get("state") or "").strip(),
+                "host": str(payload.get("host") or "").strip(),
+                "logPath": str(payload.get("log_path") or "").strip(),
+            }
+        else:
+            ok, resolved = self._resolve_task_instance(payload)
+            if not ok:
+                return False, resolved
+            task_instance = resolved
+            task_instance_id = self._safe_int(
+                task_instance.get("id") or task_instance.get("taskInstanceId")
+            )
+
+        if task_instance_id <= 0:
+            return False, {"message": "task_instance_id could not be resolved"}
+
+        attempts = [
+            (
+                "project_task_instance_log",
+                lambda: self.request(
+                    "GET",
+                    f"/projects/{project_code}/task-instances/{task_instance_id}/log",
+                ),
+            ),
+            (
+                "log_detail",
+                lambda: self.request(
+                    "GET",
+                    "/log/detail",
+                    query={"taskInstanceId": task_instance_id},
+                ),
+            ),
+        ]
+
+        failed_attempts = []
+        for endpoint_name, runner in attempts:
+            ok, result = runner()
+            if not ok:
+                failed_attempts.append({"endpoint": endpoint_name, "result": result})
+                continue
+            if not self._is_ds_success(result):
+                failed_attempts.append({"endpoint": endpoint_name, "result": result})
+                continue
+            return True, {
+                "project_code": project_code,
+                "task_instance_id": task_instance_id,
+                "process_instance_id": self._safe_int(task_instance.get("processInstanceId")),
+                "task_name": str(
+                    task_instance.get("name")
+                    or task_instance.get("taskName")
+                    or ""
+                ).strip(),
+                "task_code": self._safe_int(task_instance.get("taskCode")),
+                "state": str(task_instance.get("state") or "").strip(),
+                "host": str(task_instance.get("host") or "").strip(),
+                "log_path": str(
+                    task_instance.get("logPath")
+                    or task_instance.get("log_path")
+                    or ""
+                ).strip(),
+                "log_endpoint_used": endpoint_name,
+                "log": self._extract_task_log_text(result),
+                "raw_result": result,
+                "task_instance": task_instance,
+            }
+
+        return False, {
+            "message": "failed to fetch task log",
+            "project_code": project_code,
+            "task_instance_id": task_instance_id,
+            "attempts": failed_attempts,
+        }
+
     def get_instance(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
         instance_id = payload.get("instance_id")
@@ -517,6 +626,100 @@ class DolphinSchedulerClient:
             if datasource and item_name == datasource:
                 return True, item
         return False, {"message": f"datasource not found: {datasource}"}
+
+    def _resolve_task_instance(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        process_instance_id = self._safe_int(
+            payload.get("process_instance_id")
+            or payload.get("instance_id")
+            or payload.get("workflow_instance_id")
+        )
+        task_name = str(payload.get("task_name") or "").strip()
+        task_code = self._safe_int(payload.get("task_code"))
+        if process_instance_id <= 0:
+            return False, {
+                "message": "get_task_log requires task_instance_id or process_instance_id/instance_id",
+            }
+        if not task_name and task_code <= 0:
+            return False, {
+                "message": "get_task_log requires task_name or task_code when task_instance_id is absent",
+            }
+
+        ok, result = self.list_task_instances(
+            {
+                "project_code": payload.get("project_code") or self.config.project_code,
+                "instance_id": process_instance_id,
+                "page_no": 1,
+                "page_size": max(self._safe_int(payload.get("page_size")), 100) or 100,
+                "state_type": payload.get("state_type", ""),
+                "search_val": payload.get("search_val", ""),
+            }
+        )
+        if not ok:
+            return False, result
+
+        items = self._extract_total_list(result)
+        if not items:
+            return False, {
+                "message": "no task instances found for process instance",
+                "process_instance_id": process_instance_id,
+            }
+
+        for item in items:
+            item_name = str(item.get("name") or item.get("taskName") or "").strip()
+            item_task_code = self._safe_int(item.get("taskCode"))
+            if task_name and item_name == task_name:
+                return True, item
+            if task_code > 0 and item_task_code == task_code:
+                return True, item
+        return False, {
+            "message": "task instance not found in process instance",
+            "process_instance_id": process_instance_id,
+            "task_name": task_name,
+            "task_code": task_code if task_code > 0 else "",
+            "candidates": [
+                {
+                    "task_instance_id": self._safe_int(item.get("id") or item.get("taskInstanceId")),
+                    "task_name": str(item.get("name") or item.get("taskName") or "").strip(),
+                    "task_code": self._safe_int(item.get("taskCode")),
+                    "state": str(item.get("state") or "").strip(),
+                }
+                for item in items
+            ],
+        }
+
+    def _extract_total_list(self, result: Any) -> list[Dict[str, Any]]:
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict):
+                total_list = data.get("totalList")
+                if isinstance(total_list, list):
+                    return [item for item in total_list if isinstance(item, dict)]
+                records = data.get("records")
+                if isinstance(records, list):
+                    return [item for item in records if isinstance(item, dict)]
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+        if isinstance(result, list):
+            return [item for item in result if isinstance(item, dict)]
+        return []
+
+    def _extract_task_log_text(self, result: Any) -> str:
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict):
+                for key in ("log", "content", "rawLog", "message", "msg"):
+                    value = data.get(key)
+                    if isinstance(value, str):
+                        return value
+            if isinstance(data, str):
+                return data
+            for key in ("raw", "message", "msg"):
+                value = result.get(key)
+                if isinstance(value, str):
+                    return value
+        if isinstance(result, str):
+            return result
+        return ""
 
     def extract_task_runtime_config(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = str(payload.get("project_code") or self.config.project_code).strip()

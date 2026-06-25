@@ -29,6 +29,8 @@
 - `trigger_workflow`
 - `list_instances`
 - `get_instance`
+- `list_task_instances`
+- `get_task_log`
 - `retry_instance`
 - `dump_workflow_graph`
 - `append_task`
@@ -193,6 +195,58 @@ ssh -p 36000 root@<pk-host> "cd /root/ds-scheduler-gateway && python3 scripts/ds
    - 上下线 schedule
    - 停止实例
    - 查询任务节点详情
+
+## 查询任务实例与运行日志
+
+### 查询某次工作流实例里的任务实例
+
+`list_task_instances` 用于查看某个工作流实例内部的任务执行明细。
+
+推荐 payload：
+
+```json
+{
+  "project_code": "158514956085248",
+  "instance_id": "1040772",
+  "page_no": 1,
+  "page_size": 100
+}
+```
+
+也支持直接传：
+
+- `process_instance_id`
+- `search_val`
+- `state_type`
+
+### 拉取任务运行日志
+
+`get_task_log` 支持两种调用方式：
+
+1. 直接传 `task_instance_id`
+2. 传 `instance_id/process_instance_id + task_name/task_code`，由网关先解析任务实例，再拉日志
+
+推荐 payload：
+
+```json
+{
+  "project_code": "158514956085248",
+  "instance_id": "1040772",
+  "task_name": "dwb_user_info"
+}
+```
+
+返回里会尽量带上：
+
+- `task_instance_id`
+- `process_instance_id`
+- `task_name`
+- `task_code`
+- `state`
+- `host`
+- `log_path`
+- `log`
+- `log_endpoint_used`
 
 ## 新增 SQL 任务
 
