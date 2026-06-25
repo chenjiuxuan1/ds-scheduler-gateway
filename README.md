@@ -16,6 +16,7 @@
 
 - `list_projects`
 - `list_workflows`
+- `create_workflow`
 - `list_schedules`
 - `get_schedule`
 - `create_schedule`

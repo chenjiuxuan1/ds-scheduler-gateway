@@ -88,6 +88,57 @@ class DolphinSchedulerClient:
             query=query,
         )
 
+    def create_workflow(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        workflow_name = str(payload.get("workflow_name") or "").strip()
+        if not project_code:
+            return False, {"message": "project_code is required"}
+        if not workflow_name:
+            return False, {"message": "workflow_name is required"}
+
+        form = self._build_workflow_create_form(payload)
+        ok, create_result = self._create_workflow_definition(project_code, form)
+        if not ok:
+            return False, create_result
+        if not self._is_ds_success(create_result):
+            return False, {
+                "message": "workflow create rejected by dolphinscheduler",
+                "result": create_result,
+            }
+        workflow_code = self._extract_workflow_code(create_result)
+        if not workflow_code:
+            lookup_ok, workflow_result = self.get_workflow(
+                {
+                    "project_code": project_code,
+                    "workflow_name": workflow_name,
+                    "search_val": workflow_name,
+                    "page_no": 1,
+                    "page_size": 100,
+                }
+            )
+            if lookup_ok and isinstance(workflow_result, dict):
+                workflow_code = str(
+                    workflow_result.get("code")
+                    or workflow_result.get("workflowDefinitionCode")
+                    or workflow_result.get("processDefinitionCode")
+                    or ""
+                ).strip()
+
+        return True, {
+            "project_code": project_code,
+            "workflow_name": workflow_name,
+            "workflow_code": workflow_code,
+            "description": str(payload.get("description") or "").strip(),
+            "tenant_code": str(payload.get("tenant_code") or self.config.tenant_code or "").strip(),
+            "execution_type": str(payload.get("execution_type") or "PARALLEL").strip(),
+            "timeout": self._safe_int(payload.get("timeout")),
+            "global_params": self._normalize_json_value(payload.get("global_params"), default=[]),
+            "task_definition_count": 0,
+            "task_relation_count": 0,
+            "location_count": 0,
+            "create_result": create_result,
+        }
+
     def list_projects(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         query = {
             "pageNo": payload.get("page_no", 1),
@@ -1593,6 +1644,48 @@ class DolphinSchedulerClient:
             attempts.append({"path": path, "result": result})
         return False, {"message": "all workflow update attempts failed", "attempts": attempts}
 
+    def _create_workflow_definition(
+        self,
+        project_code: str,
+        form: Dict[str, Any],
+    ) -> Tuple[bool, Any]:
+        paths = [
+            f"/projects/{project_code}/workflow-definition",
+            f"/projects/{project_code}/workflow-definitions",
+        ]
+        attempts = []
+        for path in paths:
+            ok, result = self.request("POST", path, form=form)
+            if ok:
+                return True, result
+            attempts.append({"path": path, "result": result})
+        return False, {"message": "all workflow create attempts failed", "attempts": attempts}
+
+    def _build_workflow_create_form(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        workflow_name = str(payload.get("workflow_name") or "").strip()
+        description = str(payload.get("description") or "").strip()
+        global_params = self._normalize_json_value(payload.get("global_params"), default=[])
+        timeout = payload.get("timeout")
+        if timeout in ("", None):
+            timeout = 0
+        tenant_code = str(
+            payload.get("tenant_code")
+            or self.config.tenant_code
+            or "default"
+        ).strip()
+        execution_type = str(payload.get("execution_type") or "PARALLEL").strip() or "PARALLEL"
+        return {
+            "name": workflow_name,
+            "description": description,
+            "globalParams": json.dumps(global_params, ensure_ascii=False),
+            "locations": json.dumps([], ensure_ascii=False),
+            "timeout": timeout,
+            "tenantCode": tenant_code,
+            "taskRelationJson": json.dumps([], ensure_ascii=False),
+            "taskDefinitionJson": json.dumps([], ensure_ascii=False),
+            "executionType": execution_type,
+        }
+
     def _build_workflow_update_form(
         self,
         workflow_detail: Dict[str, Any],
@@ -2659,3 +2752,27 @@ class DolphinSchedulerClient:
         if code not in (None, 0, "0"):
             return False
         return True
+
+    def _extract_workflow_code(self, result: Any) -> str:
+        if not isinstance(result, dict):
+            return ""
+        candidates: list[Any] = [
+            result.get("code"),
+            result.get("workflowCode"),
+            result.get("workflowDefinitionCode"),
+        ]
+        data = result.get("data")
+        if isinstance(data, dict):
+            candidates.extend(
+                [
+                    data.get("code"),
+                    data.get("workflowCode"),
+                    data.get("workflowDefinitionCode"),
+                    data.get("processDefinitionCode"),
+                ]
+            )
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if value and value != "0":
+                return value
+        return ""

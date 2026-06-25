@@ -12,6 +12,7 @@ from .models import CountryConfig, GatewayRequest
 SUPPORTED_ACTIONS = {
     "list_projects",
     "list_workflows",
+    "create_workflow",
     "list_schedules",
     "get_schedule",
     "create_schedule",
