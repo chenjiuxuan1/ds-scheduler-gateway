@@ -47,6 +47,12 @@
 - `get_datasource`
 - `extract_task_runtime_config`
 
+## 已知问题
+
+- `extract_task_runtime_config` 在任务定义刚被 `update_sql_task` / `update_shell_task` 更新后的短时间内，
+  个别环境可能仍返回旧的 `task_params.rawScript / sql` 视图。
+- 如需做变更后的强校验，当前优先使用 `get_workflow` 或 `dump_workflow_graph` 回读任务定义。
+
 ## 目录结构
 
 ```text

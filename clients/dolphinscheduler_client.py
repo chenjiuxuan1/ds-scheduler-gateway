@@ -2326,6 +2326,7 @@ class DolphinSchedulerClient:
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
         task = deepcopy(template)
+        original_task_type = self._normalize_task_type(task.get("taskType") or "")
         task["code"] = task_code
         task["name"] = task_name
         task["taskType"] = task_type
@@ -2340,18 +2341,31 @@ class DolphinSchedulerClient:
         params = deepcopy(task.get("taskParams") or {})
         if not isinstance(params, dict):
             params = {}
+        if task_type == "SQL" and original_task_type != "SQL":
+            params = self._build_minimal_sql_task_params(script_text=script_text, payload=payload)
         params.setdefault("localParams", [])
-        params.setdefault("resourceList", [])
-        params.setdefault("dependence", {})
-        params.setdefault("conditionResult", {"successNode": [""], "failedNode": [""]})
-        params.setdefault("waitStartTimeout", {})
-        params.setdefault("switchResult", {})
+        if task_type != "SQL":
+            params.setdefault("resourceList", [])
+            params.setdefault("dependence", {})
+            params.setdefault("conditionResult", {"successNode": [""], "failedNode": [""]})
+            params.setdefault("waitStartTimeout", {})
+            params.setdefault("switchResult", {})
         if task_type == "SQL":
+            datasource_meta = self._resolve_datasource_meta(payload)
+            if datasource_meta and not params.get("type"):
+                params["type"] = str(datasource_meta.get("type") or "").strip().upper()
             params.setdefault("sqlType", self._infer_sql_type(script_text))
             if payload.get("sql_type") is not None:
                 params["sqlType"] = self._normalize_sql_type(payload["sql_type"])
             if payload.get("datasource") not in ("", None):
                 params["datasource"] = payload["datasource"]
+            params.setdefault("title", "")
+            params.setdefault("receivers", "")
+            params.setdefault("receiversCc", "")
+            params.setdefault("showType", "TABLE")
+            params.setdefault("connParams", "")
+            params.setdefault("preStatements", [])
+            params.setdefault("postStatements", [])
             sql_field = self._pick_first_existing_key(params, ["sql", "rawSql", "rawScript", "script"])
             params[sql_field] = script_text
         else:
@@ -2360,6 +2374,44 @@ class DolphinSchedulerClient:
 
         task["taskParams"] = params
         return task
+
+    def _build_minimal_sql_task_params(self, script_text: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        datasource_meta = self._resolve_datasource_meta(payload)
+        params: Dict[str, Any] = {
+            "type": str(datasource_meta.get("type") or payload.get("datasource_type") or "").strip().upper(),
+            "datasource": payload.get("datasource"),
+            "sql": script_text,
+            "sqlType": self._normalize_sql_type(payload.get("sql_type", self._infer_sql_type(script_text))),
+            "title": "",
+            "receivers": "",
+            "receiversCc": "",
+            "showType": "TABLE",
+            "localParams": [],
+            "connParams": "",
+            "preStatements": [],
+            "postStatements": [],
+        }
+        return params
+
+    def _resolve_datasource_meta(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        datasource_id = payload.get("datasource_id") or payload.get("datasource")
+        datasource_name = payload.get("datasource_name")
+        if datasource_id in ("", None) and datasource_name in ("", None):
+            return {}
+        lookup_payload: Dict[str, Any] = {}
+        if datasource_id not in ("", None):
+            lookup_payload["datasource_id"] = datasource_id
+        if datasource_name not in ("", None):
+            lookup_payload["datasource"] = datasource_name
+        ok, result = self.get_datasource(lookup_payload)
+        if not ok:
+            return {}
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict):
+                return data
+            return result
+        return {}
 
     def _build_updated_task_definition(
         self,
