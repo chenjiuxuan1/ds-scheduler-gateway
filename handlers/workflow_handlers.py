@@ -26,6 +26,8 @@ def dispatch_action(client: DolphinSchedulerClient, action: str, payload: Dict[s
         "append_task": lambda: client.append_task(payload),
         "append_sql_task": lambda: client.append_sql_task(payload),
         "append_shell_task": lambda: client.append_shell_task(payload),
+        "update_task": lambda: client.update_task(payload),
+        "update_sql_task": lambda: client.update_sql_task(payload),
         "disable_task": lambda: client.disable_task(payload),
         "disable_tasks_except": lambda: client.disable_tasks_except(payload),
         "delete_task": lambda: client.delete_task(payload),

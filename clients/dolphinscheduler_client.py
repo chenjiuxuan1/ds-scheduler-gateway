@@ -567,6 +567,155 @@ class DolphinSchedulerClient:
         payload = {**payload, "task_type": payload.get("task_type") or "SHELL"}
         return self.append_task(payload)
 
+    def update_sql_task(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        payload = {**payload, "task_type": payload.get("task_type") or "SQL"}
+        return self.update_task(payload)
+
+    def update_task(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        workflow_code = str(payload.get("workflow_code") or "").strip()
+        task_name = str(payload.get("task_name") or "").strip()
+        task_code = self._safe_int(payload.get("task_code"))
+        if not workflow_code:
+            return False, {"message": "workflow_code is required"}
+        if not task_name and task_code <= 0:
+            return False, {"message": "task_name or task_code is required"}
+
+        ok, workflow_result = self.request(
+            "GET",
+            f"/projects/{project_code}/workflow-definition/{workflow_code}",
+        )
+        if not ok:
+            return False, workflow_result
+
+        detail = self._unwrap_workflow_detail(workflow_result)
+        if not detail:
+            return False, {"message": "workflow detail payload is empty", "raw": workflow_result}
+
+        task_definitions = self._get_workflow_task_definitions(detail)
+        task_relations = self._get_workflow_task_relations(detail)
+        locations = self._get_workflow_locations(detail)
+        workflow_meta = self._get_workflow_meta(detail)
+        integrity_issue = self._detect_workflow_param_integrity_issue(detail, task_definitions)
+        if integrity_issue:
+            return False, integrity_issue
+
+        target_task = self._find_task(task_definitions, task_name=task_name, task_code=task_code)
+        if not target_task:
+            return False, {
+                "message": "task not found",
+                "task_name": task_name,
+                "task_code": task_code if task_code > 0 else "",
+            }
+
+        mutated_task, change_summary = self._build_updated_task_definition(target_task, payload)
+        if not change_summary.get("changed_fields"):
+            return False, {
+                "message": "nothing to update",
+                "hint": "provide sql/script/local_params/task_params_patch/task_description/datasource/sql_type/etc.",
+                "task_name": str(target_task.get("name") or "").strip(),
+                "task_code": self._safe_int(target_task.get("code")),
+            }
+
+        target_task_code = self._safe_int(target_task.get("code"))
+        updated_task_definitions: list[Dict[str, Any]] = []
+        for item in task_definitions:
+            if self._safe_int(item.get("code")) == target_task_code:
+                updated_task_definitions.append(mutated_task)
+            else:
+                updated_task_definitions.append(deepcopy(item))
+
+        original_release_state = str(workflow_meta.get("releaseState") or "").upper()
+        schedule_summary = self._resolve_schedule_summary(
+            project_code=project_code,
+            workflow_detail=detail,
+        )
+        original_schedule_release_state = str(schedule_summary.get("release_state") or "").upper()
+        original_schedule_id = str(schedule_summary.get("schedule_id") or "").strip()
+        restore_original_state = payload.get("restore_original_state", payload.get("restore_online", True))
+        auto_offline = payload.get("auto_offline", True)
+        was_online = original_release_state == "ONLINE"
+        was_schedule_online = original_schedule_release_state == "ONLINE"
+
+        if was_online and auto_offline:
+            ok, offline_result = self.release_workflow(
+                {"project_code": project_code, "workflow_code": workflow_code},
+                "OFFLINE",
+            )
+            if not ok:
+                return False, {
+                    "message": "failed to offline workflow before update",
+                    "detail": offline_result,
+                }
+
+        update_form = self._build_workflow_update_form(
+            workflow_detail=detail,
+            payload=payload,
+            task_definitions=updated_task_definitions,
+            task_relations=task_relations,
+            locations=locations,
+        )
+        ok, update_result = self._update_workflow_definition(project_code, workflow_code, update_form)
+        if not ok:
+            return False, update_result
+        if not self._is_ds_success(update_result):
+            return False, {
+                "message": "workflow update rejected by dolphinscheduler",
+                "result": update_result,
+            }
+
+        restore_result = None
+        if was_online and restore_original_state:
+            restore_ok, restore_result = self.release_workflow(
+                {"project_code": project_code, "workflow_code": workflow_code},
+                "ONLINE",
+            )
+            if not restore_ok:
+                return False, {
+                    "message": "workflow updated but failed to restore original release state",
+                    "update_result": update_result,
+                    "restore_result": restore_result,
+                    "original_release_state": original_release_state,
+                }
+
+        restore_schedule_result = None
+        if was_schedule_online and restore_original_state and original_schedule_id:
+            restore_schedule_ok, restore_schedule_result = self.release_schedule(
+                {"project_code": project_code},
+                original_schedule_id,
+                "ONLINE",
+            )
+            if not restore_schedule_ok:
+                return False, {
+                    "message": "workflow updated but failed to restore original schedule release state",
+                    "update_result": update_result,
+                    "restore_result": restore_result,
+                    "restore_schedule_result": restore_schedule_result,
+                    "original_release_state": original_release_state,
+                    "original_schedule_release_state": original_schedule_release_state,
+                    "schedule_id": original_schedule_id,
+                }
+
+        return True, {
+            "workflow_code": workflow_code,
+            "project_code": project_code,
+            "task_name": str(mutated_task.get("name") or "").strip(),
+            "task_code": self._safe_int(mutated_task.get("code")),
+            "task_type": str(mutated_task.get("taskType") or "").strip(),
+            "change_summary": change_summary,
+            "original_release_state": original_release_state,
+            "original_schedule_release_state": original_schedule_release_state,
+            "schedule_id": original_schedule_id,
+            "schedule_summary": schedule_summary,
+            "restored_original_state": bool(was_online and restore_original_state),
+            "restored_original_schedule_state": bool(
+                was_schedule_online and restore_original_state and original_schedule_id
+            ),
+            "update_result": update_result,
+            "restore_result": restore_result,
+            "restore_schedule_result": restore_schedule_result,
+        }
+
     def disable_task(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = str(payload.get("project_code") or self.config.project_code).strip()
         workflow_code = str(payload.get("workflow_code") or "").strip()
@@ -1823,6 +1972,204 @@ class DolphinSchedulerClient:
 
         task["taskParams"] = params
         return task
+
+    def _build_updated_task_definition(
+        self,
+        target_task: Dict[str, Any],
+        payload: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        task = deepcopy(target_task)
+        original_params = deepcopy(task.get("taskParams") or {})
+        task_type = self._normalize_task_type(payload.get("task_type") or task.get("taskType") or "SQL")
+        task["taskType"] = task_type
+
+        changed_fields: list[str] = []
+        if payload.get("task_name") not in ("", None):
+            new_name = str(payload.get("task_name") or "").strip()
+            if new_name and new_name != str(task.get("name") or "").strip():
+                task["name"] = new_name
+                changed_fields.append("task_name")
+        if payload.get("task_description") is not None:
+            new_description = payload.get("task_description", "")
+            if new_description != task.get("description", ""):
+                task["description"] = new_description
+                changed_fields.append("task_description")
+        if payload.get("environment_code") not in ("", None):
+            environment_code = str(payload.get("environment_code") or "").strip()
+            if environment_code != str(task.get("environmentCode") or "").strip():
+                task["environmentCode"] = environment_code
+                changed_fields.append("environment_code")
+
+        params = deepcopy(task.get("taskParams") or {})
+        if not isinstance(params, dict):
+            params = {}
+        params.setdefault("localParams", [])
+        params.setdefault("resourceList", [])
+        params.setdefault("dependence", {})
+        params.setdefault("conditionResult", {"successNode": [""], "failedNode": [""]})
+        params.setdefault("waitStartTimeout", {})
+        params.setdefault("switchResult", {})
+
+        script_text = self._resolve_task_content(payload, task_type)
+        if script_text:
+            if task_type == "SQL":
+                sql_field = self._pick_first_existing_key(params, ["sql", "rawSql", "rawScript", "script"])
+                if str(params.get(sql_field) or "") != script_text:
+                    params[sql_field] = script_text
+                    changed_fields.append("sql")
+                if payload.get("sql_type") is not None:
+                    sql_type = self._normalize_sql_type(payload["sql_type"])
+                    if self._safe_int(params.get("sqlType"), -1) != sql_type:
+                        params["sqlType"] = sql_type
+                        changed_fields.append("sql_type")
+                self._apply_sql_task_optional_fields(params, payload)
+            else:
+                script_field = self._pick_first_existing_key(params, ["rawScript", "script", "rawSql", "sql"])
+                if str(params.get(script_field) or "") != script_text:
+                    params[script_field] = script_text
+                    changed_fields.append("script")
+
+        if payload.get("datasource") not in ("", None):
+            datasource = payload["datasource"]
+            if params.get("datasource") != datasource:
+                params["datasource"] = datasource
+                changed_fields.append("datasource")
+
+        params = self._apply_task_param_mutations(params, payload, default_local_params=params.get("localParams") or [])
+        if json.dumps(params, ensure_ascii=False, sort_keys=True) != json.dumps(
+            original_params, ensure_ascii=False, sort_keys=True
+        ):
+            changed_fields.append("task_params")
+
+        task["taskParams"] = params
+        return task, {
+            "changed_fields": sorted(set(changed_fields)),
+            "task_type": task_type,
+        }
+
+    def _apply_sql_task_optional_fields(self, params: Dict[str, Any], payload: Dict[str, Any]) -> None:
+        field_mapping = {
+            "title": "title",
+            "receivers": "receivers",
+            "receivers_cc": "receiversCc",
+            "show_type": "showType",
+            "conn_params": "connParams",
+        }
+        for payload_key, params_key in field_mapping.items():
+            if payload.get(payload_key) is not None:
+                params[params_key] = payload.get(payload_key)
+
+    def _apply_task_param_mutations(
+        self,
+        params: Dict[str, Any],
+        payload: Dict[str, Any],
+        default_local_params: list[Dict[str, Any]] | None = None,
+    ) -> Dict[str, Any]:
+        updated = deepcopy(params)
+        local_params = self._normalize_local_params(
+            payload.get("local_params", payload.get("task_local_params"))
+        )
+        if local_params:
+            replace_local_params = bool(payload.get("replace_local_params", False))
+            updated["localParams"] = self._merge_local_params(
+                existing=updated.get("localParams") or default_local_params or [],
+                incoming=local_params,
+                replace=replace_local_params,
+            )
+
+        pre_statements = self._normalize_statement_list(payload.get("pre_statements"))
+        if pre_statements is not None:
+            updated["preStatements"] = pre_statements
+
+        post_statements = self._normalize_statement_list(payload.get("post_statements"))
+        if post_statements is not None:
+            updated["postStatements"] = post_statements
+
+        task_params_patch = payload.get("task_params_patch")
+        if isinstance(task_params_patch, dict):
+            for key, value in task_params_patch.items():
+                updated[key] = deepcopy(value)
+
+        return updated
+
+    def _normalize_local_params(self, raw: Any) -> list[Dict[str, Any]]:
+        if raw in (None, "", []):
+            return []
+        if isinstance(raw, dict):
+            normalized_list: list[Dict[str, Any]] = []
+            for prop, value in raw.items():
+                normalized_list.append(
+                    {
+                        "prop": str(prop),
+                        "direct": "IN",
+                        "type": self._infer_param_type(value),
+                        "value": "" if value is None else str(value),
+                    }
+                )
+            return normalized_list
+        if not isinstance(raw, list):
+            return []
+
+        normalized: list[Dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            prop = str(item.get("prop") or "").strip()
+            if not prop:
+                continue
+            direct = str(item.get("direct") or "IN").strip().upper() or "IN"
+            param_type = str(item.get("type") or self._infer_param_type(item.get("value"))).strip().upper()
+            value = item.get("value")
+            normalized.append(
+                {
+                    "prop": prop,
+                    "direct": direct,
+                    "type": param_type or "VARCHAR",
+                    "value": "" if value is None else str(value),
+                }
+            )
+        return normalized
+
+    def _merge_local_params(
+        self,
+        existing: list[Dict[str, Any]],
+        incoming: list[Dict[str, Any]],
+        *,
+        replace: bool,
+    ) -> list[Dict[str, Any]]:
+        if replace:
+            return deepcopy(incoming)
+
+        merged_by_prop: dict[str, Dict[str, Any]] = {}
+        order: list[str] = []
+        for source in list(existing or []) + list(incoming or []):
+            if not isinstance(source, dict):
+                continue
+            prop = str(source.get("prop") or "").strip()
+            if not prop:
+                continue
+            if prop not in merged_by_prop:
+                order.append(prop)
+            merged_by_prop[prop] = deepcopy(source)
+        return [merged_by_prop[prop] for prop in order]
+
+    def _normalize_statement_list(self, raw: Any) -> list[str] | None:
+        if raw is None:
+            return None
+        if raw == "":
+            return []
+        if isinstance(raw, list):
+            return [str(item) for item in raw if str(item).strip()]
+        return [str(raw)]
+
+    def _infer_param_type(self, value: Any) -> str:
+        if isinstance(value, bool):
+            return "BOOLEAN"
+        if isinstance(value, int):
+            return "INTEGER"
+        if isinstance(value, float):
+            return "FLOAT"
+        return "VARCHAR"
 
     def _append_location(
         self,

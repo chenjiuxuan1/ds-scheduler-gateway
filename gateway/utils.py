@@ -29,6 +29,8 @@ SUPPORTED_ACTIONS = {
     "append_task",
     "append_sql_task",
     "append_shell_task",
+    "update_task",
+    "update_sql_task",
     "disable_task",
     "disable_tasks_except",
     "delete_task",
