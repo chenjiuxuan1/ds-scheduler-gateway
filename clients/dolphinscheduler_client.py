@@ -486,7 +486,7 @@ class DolphinSchedulerClient:
         project_code = payload.get("project_code") or self.config.project_code
         path = f"/projects/{project_code}/schedules/{schedule_id}/release"
         attempts = []
-        for method in ("POST", "PUT"):
+        for method in ("POST", "GET", "PUT"):
             ok, result = self.request(
                 method,
                 path,
@@ -637,6 +637,7 @@ class DolphinSchedulerClient:
                     query={
                         "taskInstanceId": task_instance_id,
                         "skipLineNum": self._safe_int(payload.get("skip_line_num"), 0),
+                        "limit": self._safe_int(payload.get("limit"), 2000),
                     },
                 ),
             ),
@@ -884,7 +885,24 @@ class DolphinSchedulerClient:
         return self.append_task(payload)
 
     def update_sql_task(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
-        payload = {**payload, "task_type": payload.get("task_type") or "SQL"}
+        normalized_payload = {**payload, "task_type": payload.get("task_type") or "SQL"}
+        task_params_patch = deepcopy(normalized_payload.get("task_params_patch") or {})
+        if not isinstance(task_params_patch, dict):
+            task_params_patch = {}
+        sql_value = str(
+            normalized_payload.get("sql")
+            or normalized_payload.get("raw_sql")
+            or normalized_payload.get("script")
+            or ""
+        ).strip()
+        if sql_value:
+            task_params_patch["sql"] = sql_value
+        if task_params_patch:
+            normalized_payload["task_params_patch"] = task_params_patch
+        normalized_payload.pop("sql", None)
+        normalized_payload.pop("raw_sql", None)
+        normalized_payload.pop("script", None)
+        payload = normalized_payload
         return self.update_task(payload)
 
     def update_shell_task(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
