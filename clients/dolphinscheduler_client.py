@@ -249,27 +249,74 @@ class DolphinSchedulerClient:
         if not workflow_code:
             return False, {"message": "workflow_code is required"}
 
-        form = self._build_schedule_form(payload, project_code=project_code, workflow_code=workflow_code)
-        return self.request("POST", f"/projects/{project_code}/schedules", form=form)
+        forms = self._build_schedule_forms(payload, project_code=project_code, workflow_code=workflow_code)
+        attempts = []
+        for form_label, form in forms:
+            ok, result = self.request("POST", f"/projects/{project_code}/schedules", form=form)
+            if ok and self._is_ds_success(result):
+                if isinstance(result, dict):
+                    result = {**result, "form_label": form_label}
+                return True, result
+            attempts.append({"form_label": form_label, "result": result})
+        return False, {
+            "message": "all create_schedule attempts failed",
+            "project_code": project_code,
+            "workflow_code": workflow_code,
+            "attempts": attempts,
+        }
 
     def update_schedule(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = str(payload.get("project_code") or self.config.project_code).strip()
         workflow_code = str(payload.get("workflow_code") or "").strip()
         schedule_id = self._resolve_schedule_id(payload)
         if not schedule_id:
+            if workflow_code:
+                return False, {
+                    "message": "schedule not found for workflow_code",
+                    "project_code": project_code,
+                    "workflow_code": workflow_code,
+                }
             return False, {"message": "schedule_id or workflow_code is required"}
-        form = self._build_schedule_form(payload, project_code=project_code, workflow_code=workflow_code)
-        return self.request("PUT", f"/projects/{project_code}/schedules/{schedule_id}", form=form)
+        forms = self._build_schedule_forms(payload, project_code=project_code, workflow_code=workflow_code)
+        attempts = []
+        for form_label, form in forms:
+            ok, result = self.request("PUT", f"/projects/{project_code}/schedules/{schedule_id}", form=form)
+            if ok and self._is_ds_success(result):
+                if isinstance(result, dict):
+                    result = {**result, "form_label": form_label}
+                return True, result
+            attempts.append({"form_label": form_label, "result": result})
+        return False, {
+            "message": "all update_schedule attempts failed",
+            "project_code": project_code,
+            "workflow_code": workflow_code,
+            "schedule_id": schedule_id,
+            "attempts": attempts,
+        }
 
     def online_schedule(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         schedule_id = self._resolve_schedule_id(payload)
         if not schedule_id:
+            workflow_code = str(payload.get("workflow_code") or "").strip()
+            if workflow_code:
+                return False, {
+                    "message": "schedule not found for workflow_code",
+                    "project_code": str(payload.get("project_code") or self.config.project_code).strip(),
+                    "workflow_code": workflow_code,
+                }
             return False, {"message": "schedule_id or workflow_code is required"}
         return self.release_schedule(payload, schedule_id, "ONLINE")
 
     def offline_schedule(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         schedule_id = self._resolve_schedule_id(payload)
         if not schedule_id:
+            workflow_code = str(payload.get("workflow_code") or "").strip()
+            if workflow_code:
+                return False, {
+                    "message": "schedule not found for workflow_code",
+                    "project_code": str(payload.get("project_code") or self.config.project_code).strip(),
+                    "workflow_code": workflow_code,
+                }
             return False, {"message": "schedule_id or workflow_code is required"}
         return self.release_schedule(payload, schedule_id, "OFFLINE")
 
@@ -389,12 +436,12 @@ class DolphinSchedulerClient:
         ok, result = self.request(
             "POST",
             f"/projects/{project_code}/executors/execute",
-            json_body={
-                "processInstanceId": instance_id,
+            form={
+                "workflowInstanceId": instance_id,
                 "executeType": execute_type,
             },
         )
-        if not ok:
+        if not ok or not self._is_ds_success(result):
             return False, result
         return True, {
             "project_code": project_code,
@@ -445,7 +492,7 @@ class DolphinSchedulerClient:
                 path,
                 query={"releaseState": release_state},
             )
-            if ok:
+            if ok and self._is_ds_success(result):
                 return True, result
             attempts.append({"method": method, "result": result})
             status = result.get("status") if isinstance(result, dict) else None
@@ -601,6 +648,16 @@ class DolphinSchedulerClient:
             if not self._is_ds_success(result):
                 failed_attempts.append({"endpoint": endpoint_name, "result": result})
                 continue
+            log_text = self._extract_task_log_text(result)
+            if self._looks_like_html_document(log_text):
+                failed_attempts.append(
+                    {
+                        "endpoint": endpoint_name,
+                        "result": result,
+                        "reason": "html_document_returned",
+                    }
+                )
+                continue
             return True, {
                 "project_code": project_code,
                 "task_instance_id": task_instance_id,
@@ -619,7 +676,7 @@ class DolphinSchedulerClient:
                     or ""
                 ).strip(),
                 "log_endpoint_used": endpoint_name,
-                "log": self._extract_task_log_text(result),
+                "log": log_text,
                 "raw_result": result,
                 "task_instance": task_instance,
             }
@@ -766,6 +823,13 @@ class DolphinSchedulerClient:
         if isinstance(result, str):
             return result
         return ""
+
+    def _looks_like_html_document(self, text: str) -> bool:
+        normalized = str(text or "").lstrip().lower()
+        if not normalized:
+            return False
+        probe = normalized[:1000]
+        return "<!doctype html" in probe or "<html" in probe
 
     def extract_task_runtime_config(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = str(payload.get("project_code") or self.config.project_code).strip()
@@ -1485,9 +1549,14 @@ class DolphinSchedulerClient:
         template_name = str(payload.get("template_task_name") or "").strip()
         template = self._find_template_task(task_definitions, template_name, task_type)
         if not template:
+            for item in task_definitions:
+                if isinstance(item, dict) and item:
+                    template = deepcopy(item)
+                    break
+        if not template:
             return False, {
-                "message": f"no {task_type} task template found in workflow",
-                "hint": f"set payload.template_task_name to an existing {task_type} task name in this workflow",
+                "message": "workflow has no existing task nodes to clone from",
+                "hint": "create_workflow bootstrap should create at least one starter task",
             }
 
         new_task_code = self._next_code(
@@ -2187,13 +2256,13 @@ class DolphinSchedulerClient:
             return ""
         return str(result.get("id") or result.get("scheduleId") or "").strip()
 
-    def _build_schedule_form(
+    def _build_schedule_forms(
         self,
         payload: Dict[str, Any],
         *,
         project_code: str,
         workflow_code: str,
-    ) -> Dict[str, Any]:
+    ) -> list[tuple[str, Dict[str, Any]]]:
         schedule_value = payload.get("schedule_json")
         if schedule_value in ("", None):
             schedule_value = {
@@ -2209,8 +2278,7 @@ class DolphinSchedulerClient:
             or "MEDIUM"
         ).strip()
 
-        form = {
-            "processDefinitionCode": workflow_code,
+        base_form = {
             "warningType": str(payload.get("warning_type") or "NONE").strip(),
             "warningGroupId": str(payload.get("warning_group_id") or "0").strip(),
             "failureStrategy": str(payload.get("failure_strategy") or "CONTINUE").strip(),
@@ -2222,11 +2290,26 @@ class DolphinSchedulerClient:
         }
         environment_code = str(payload.get("environment_code") or self.config.environment_code or "").strip()
         if environment_code:
-            form["environmentCode"] = environment_code
+            base_form["environmentCode"] = environment_code
         custom_params = payload.get("custom_params") or {}
         if custom_params:
-            form["startParams"] = json.dumps(custom_params, ensure_ascii=False)
-        return form
+            base_form["startParams"] = json.dumps(custom_params, ensure_ascii=False)
+        return [
+            (
+                "workflow_definition_code",
+                {
+                    **deepcopy(base_form),
+                    "workflowDefinitionCode": workflow_code,
+                },
+            ),
+            (
+                "process_definition_code",
+                {
+                    **deepcopy(base_form),
+                    "processDefinitionCode": workflow_code,
+                },
+            ),
+        ]
 
     def _match_schedule_record(
         self,
