@@ -2552,6 +2552,12 @@ class DolphinSchedulerClient:
                 params["sqlType"] = self._normalize_sql_type(payload["sql_type"])
             if datasource_value not in ("", None):
                 params["datasource"] = datasource_value
+            params.setdefault("resourceList", [])
+            params.setdefault("title", "")
+            params.setdefault("receivers", "")
+            params.setdefault("receiversCc", "")
+            params.setdefault("showType", "TABLE")
+            params.setdefault("connParams", "")
             params.setdefault("preStatements", [])
             params.setdefault("postStatements", [])
             if "displayRows" not in params:
@@ -2584,6 +2590,12 @@ class DolphinSchedulerClient:
                 else self._infer_sql_type(script_text)
             ),
             "localParams": [],
+            "resourceList": [],
+            "title": "",
+            "receivers": "",
+            "receiversCc": "",
+            "showType": "TABLE",
+            "connParams": "",
             "preStatements": [],
             "postStatements": [],
             "displayRows": 10,
@@ -2656,6 +2668,12 @@ class DolphinSchedulerClient:
             if datasource_meta:
                 params["type"] = str(datasource_meta.get("type") or "").strip().upper()
             params.setdefault("sqlType", self._infer_sql_type(script_text or str(params.get("sql") or "")))
+            params.setdefault("resourceList", [])
+            params.setdefault("title", "")
+            params.setdefault("receivers", "")
+            params.setdefault("receiversCc", "")
+            params.setdefault("showType", "TABLE")
+            params.setdefault("connParams", "")
             params.setdefault("preStatements", [])
             params.setdefault("postStatements", [])
             if "displayRows" not in params:
