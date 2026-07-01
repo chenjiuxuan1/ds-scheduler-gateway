@@ -2517,6 +2517,15 @@ class DolphinSchedulerClient:
     ) -> Dict[str, Any]:
         task = deepcopy(template)
         original_task_type = self._normalize_task_type(task.get("taskType") or "")
+        if task_type == "SQL":
+            sql_task = self._build_sql_task_definition(
+                template=template,
+                task_name=task_name,
+                task_code=task_code,
+                script_text=script_text,
+                payload=payload,
+            )
+            return self._strip_task_server_fields(sql_task)
         task["code"] = task_code
         task["name"] = task_name
         task["taskType"] = task_type
@@ -2575,6 +2584,75 @@ class DolphinSchedulerClient:
             default_local_params=params.get("localParams") or [],
         )
         return self._strip_task_server_fields(task)
+
+    def _build_sql_task_definition(
+        self,
+        template: Dict[str, Any],
+        task_name: str,
+        task_code: int,
+        script_text: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        template = deepcopy(template)
+        template_params = deepcopy(template.get("taskParams") or {})
+        if not isinstance(template_params, dict):
+            template_params = {}
+
+        base_task: Dict[str, Any] = {
+            "code": task_code,
+            "version": 1,
+            "name": task_name,
+            "description": payload.get("task_description", template.get("description", "")),
+            "projectCode": self._safe_int(
+                payload.get("project_code") or template.get("projectCode") or self.config.project_code
+            ),
+            "taskType": "SQL",
+            "taskParamList": [],
+            "taskParamMap": None,
+            "flag": template.get("flag", "YES"),
+            "taskPriority": template.get("taskPriority", "MEDIUM"),
+            "workerGroup": template.get("workerGroup", self.config.worker_group),
+            "environmentCode": (
+                payload.get("environment_code")
+                if payload.get("environment_code") not in ("", None)
+                else template.get("environmentCode", self.config.environment_code or -1)
+            ),
+            "failRetryTimes": self._safe_int(template.get("failRetryTimes"), 0),
+            "failRetryInterval": self._safe_int(template.get("failRetryInterval"), 1),
+            "timeoutFlag": template.get("timeoutFlag", "CLOSE"),
+            "timeoutNotifyStrategy": template.get("timeoutNotifyStrategy"),
+            "timeout": self._safe_int(template.get("timeout"), 0),
+            "delayTime": self._safe_int(template.get("delayTime"), 0),
+            "resourceIds": template.get("resourceIds"),
+            "taskGroupId": self._safe_int(template.get("taskGroupId"), 0),
+            "taskGroupPriority": self._safe_int(template.get("taskGroupPriority"), 0),
+            "cpuQuota": self._safe_int(template.get("cpuQuota"), -1),
+            "memoryMax": self._safe_int(template.get("memoryMax"), -1),
+            "taskExecuteType": template.get("taskExecuteType", "BATCH"),
+        }
+
+        params = self._build_minimal_sql_task_params(script_text=script_text, payload=payload)
+        for key in (
+            "resourceList",
+            "title",
+            "receivers",
+            "receiversCc",
+            "showType",
+            "connParams",
+            "preStatements",
+            "postStatements",
+            "displayRows",
+            "localParams",
+        ):
+            if key in template_params and key not in params:
+                params[key] = deepcopy(template_params[key])
+        params = self._apply_task_param_mutations(
+            params,
+            payload,
+            default_local_params=params.get("localParams") or [],
+        )
+        base_task["taskParams"] = params
+        return base_task
 
     def _build_minimal_sql_task_params(self, script_text: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         datasource_meta = self._resolve_datasource_meta(payload)
@@ -2655,10 +2733,15 @@ class DolphinSchedulerClient:
             params = {}
         script_text = self._resolve_task_content(payload, task_type)
         if task_type == "SQL" and original_task_type != "SQL":
-            params = self._build_minimal_sql_task_params(
+            rebuilt = self._build_sql_task_definition(
+                template=task,
+                task_name=str(task.get("name") or "").strip() or str(payload.get("task_name") or "").strip(),
+                task_code=self._safe_int(task.get("code")),
                 script_text=script_text or "select 1",
                 payload=payload,
             )
+            task.update({k: v for k, v in rebuilt.items() if k != "code"})
+            params = deepcopy(rebuilt.get("taskParams") or {})
         params.setdefault("localParams", [])
         if task_type == "SQL":
             datasource_meta = self._resolve_datasource_meta(payload)
