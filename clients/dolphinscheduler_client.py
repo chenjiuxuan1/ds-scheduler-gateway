@@ -2479,7 +2479,7 @@ class DolphinSchedulerClient:
 
     def _normalize_json_value(self, *values: Any, default: Any = None) -> Any:
         for value in values:
-            if value in ("", None):
+            if value in ("", None, {}, []):
                 continue
             if isinstance(value, (list, dict)):
                 return deepcopy(value)
@@ -2762,10 +2762,30 @@ class DolphinSchedulerClient:
         return params
 
     def _resolve_datasource_meta(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        datasource_id = payload.get("datasource_id") or payload.get("datasource")
-        datasource_name = payload.get("datasource_name")
+        raw_datasource_id = payload.get("datasource_id")
+        raw_datasource = payload.get("datasource")
+        raw_datasource_name = payload.get("datasource_name")
+
+        datasource_id = None
+        datasource_name = None
+
+        if raw_datasource_id not in ("", None):
+            datasource_id = raw_datasource_id
+        elif isinstance(raw_datasource, (int, float)):
+            datasource_id = int(raw_datasource)
+        else:
+            datasource_text = str(raw_datasource or "").strip()
+            if datasource_text.isdigit():
+                datasource_id = int(datasource_text)
+            elif datasource_text:
+                datasource_name = datasource_text
+
+        if datasource_name is None and raw_datasource_name not in ("", None):
+            datasource_name = str(raw_datasource_name).strip() or None
+
         if datasource_id in ("", None) and datasource_name in ("", None):
             return {}
+
         lookup_payload: Dict[str, Any] = {}
         if datasource_id not in ("", None):
             lookup_payload["datasource_id"] = datasource_id
@@ -2907,7 +2927,7 @@ class DolphinSchedulerClient:
             if payload_key not in payload:
                 continue
             value = payload.get(payload_key)
-            if value in ("", None):
+            if value in ("", None, {}, []):
                 continue
             params[params_key] = value
 
@@ -3325,33 +3345,33 @@ class DolphinSchedulerClient:
         prefix = sql_text.lstrip().lower()
         for keyword in ("select", "with", "show", "desc", "explain"):
             if prefix.startswith(keyword):
-                return "query"
-        return "non_query"
+                return "0"
+        return "1"
 
     def _normalize_sql_type(self, sql_type: Any) -> str:
         if isinstance(sql_type, str):
             normalized = sql_type.strip().lower()
             aliases = {
-                "0": "query",
-                "query": "query",
-                "select": "query",
-                "read": "query",
-                "查询": "query",
-                "1": "non_query",
-                "non_query": "non_query",
-                "non-query": "non_query",
-                "nonquery": "non_query",
-                "update": "non_query",
-                "write": "non_query",
-                "execute": "non_query",
-                "非查询": "non_query",
+                "0": "0",
+                "query": "0",
+                "select": "0",
+                "read": "0",
+                "查询": "0",
+                "1": "1",
+                "non_query": "1",
+                "non-query": "1",
+                "nonquery": "1",
+                "update": "1",
+                "write": "1",
+                "execute": "1",
+                "非查询": "1",
             }
             if normalized in aliases:
                 return aliases[normalized]
         normalized_int = self._safe_int(sql_type, -1)
         if normalized_int in (0, 1):
-            return "query" if normalized_int == 0 else "non_query"
-        return "non_query"
+            return "0" if normalized_int == 0 else "1"
+        return "1"
 
     def _resolve_sql_task_datasource_value(
         self,
