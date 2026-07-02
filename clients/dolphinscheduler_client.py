@@ -2517,15 +2517,6 @@ class DolphinSchedulerClient:
     ) -> Dict[str, Any]:
         task = deepcopy(template)
         original_task_type = self._normalize_task_type(task.get("taskType") or "")
-        if task_type == "SQL":
-            sql_task = self._build_sql_task_definition(
-                template=template,
-                task_name=task_name,
-                task_code=task_code,
-                script_text=script_text,
-                payload=payload,
-            )
-            return self._strip_task_server_fields(sql_task)
         if task_type == "SHELL" and original_task_type != "SHELL":
             shell_task = self._build_shell_task_definition(
                 template=template,
@@ -2550,7 +2541,11 @@ class DolphinSchedulerClient:
         if not isinstance(params, dict):
             params = {}
         if task_type == "SQL" and original_task_type != "SQL":
-            params = self._build_minimal_sql_task_params(script_text=script_text, payload=payload)
+            params = self._build_minimal_sql_task_params(
+                script_text=script_text,
+                payload=payload,
+                template_params=params,
+            )
         params.setdefault("localParams", [])
         if task_type != "SQL":
             params.setdefault("resourceList", [])
