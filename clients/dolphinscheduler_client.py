@@ -97,6 +97,16 @@ class DolphinSchedulerClient:
         if not workflow_name:
             return False, {"message": "workflow_name is required"}
 
+        initial_task_type = self._resolve_create_workflow_task_type(payload)
+        if initial_task_type == "SQL":
+            if not str(payload.get("sql") or "").strip():
+                return False, {"message": "create_workflow with SQL initial task requires sql"}
+            if not (payload.get("datasource_id") not in ("", None) or str(payload.get("datasource") or "").strip()):
+                return False, {"message": "create_workflow with SQL initial task requires datasource or datasource_id"}
+        if initial_task_type == "SHELL":
+            if not str(payload.get("script") or payload.get("bootstrap_script") or "").strip():
+                return False, {"message": "create_workflow with SHELL initial task requires script or bootstrap_script"}
+
         ok, create_result, create_attempt = self._create_workflow_definition(project_code, payload)
         if not ok:
             return False, create_result
@@ -128,9 +138,11 @@ class DolphinSchedulerClient:
             "execution_type": str(payload.get("execution_type") or "PARALLEL").strip(),
             "timeout": self._safe_int(payload.get("timeout")),
             "global_params": self._normalize_json_value(payload.get("global_params"), default=[]),
-            "task_definition_count": 0,
-            "task_relation_count": 0,
-            "location_count": 0,
+            "initial_task_type": initial_task_type,
+            "initial_task_name": self._resolve_create_workflow_task_name(payload, initial_task_type),
+            "task_definition_count": 1 if initial_task_type else 0,
+            "task_relation_count": 1 if initial_task_type else 0,
+            "location_count": 1 if initial_task_type else 0,
             "create_attempt": create_attempt,
             "create_result": create_result,
         }
@@ -1864,46 +1876,38 @@ class DolphinSchedulerClient:
             or "default"
         ).strip()
         execution_type = str(payload.get("execution_type") or "PARALLEL").strip() or "PARALLEL"
-        bootstrap_task_name = str(payload.get("bootstrap_task_name") or "__bootstrap_shell__").strip()
-        bootstrap_script = str(
-            payload.get("bootstrap_script")
-            or payload.get("script")
-            or "echo ds_scheduler_bootstrap_ok"
-        ).strip()
+        bootstrap_task_type = self._resolve_create_workflow_task_type(payload)
+        bootstrap_task_name = self._resolve_create_workflow_task_name(payload, bootstrap_task_type)
         bootstrap_task_code = self._next_code([])
         bootstrap_relation_code = self._next_code([bootstrap_task_code])
-        bootstrap_task = {
-            "code": bootstrap_task_code,
-            "version": 1,
-            "name": bootstrap_task_name,
-            "description": "bootstrap shell task created by ds-scheduler create_workflow",
-            "taskType": "SHELL",
-            "taskParams": {
-                "localParams": [],
-                "resourceList": [],
-                "dependence": {},
-                "conditionResult": {"successNode": [""], "failedNode": [""]},
-                "waitStartTimeout": {},
-                "switchResult": {},
-                "rawScript": bootstrap_script,
-            },
-            "flag": "YES",
-            "taskPriority": "MEDIUM",
-            "workerGroup": self.config.worker_group,
-            "environmentCode": payload.get("environment_code") or self.config.environment_code or "",
-            "failRetryTimes": 0,
-            "failRetryInterval": 1,
-            "timeoutFlag": "CLOSE",
-            "timeoutNotifyStrategy": "",
-            "timeout": 0,
-            "delayTime": 0,
-            "taskGroupId": 0,
-            "taskGroupPriority": 0,
-            "cpuQuota": -1,
-            "memoryMax": -1,
-            "taskExecuteType": "BATCH",
+        template: Dict[str, Any] = {
             "projectCode": self._safe_int(payload.get("project_code") or self.config.project_code),
+            "workerGroup": self.config.worker_group,
+            "environmentCode": payload.get("environment_code") or self.config.environment_code or -1,
         }
+        if bootstrap_task_type == "SQL":
+            bootstrap_task = self._build_sql_task_definition(
+                template=template,
+                task_name=bootstrap_task_name,
+                task_code=bootstrap_task_code,
+                script_text=str(payload.get("sql") or "").strip(),
+                payload=payload,
+            )
+            bootstrap_label = "workflow_definition_bootstrap_sql"
+        else:
+            bootstrap_script = str(
+                payload.get("bootstrap_script")
+                or payload.get("script")
+                or "echo ds_scheduler_bootstrap_ok"
+            ).strip()
+            bootstrap_task = self._build_shell_task_definition(
+                template=template,
+                task_name=bootstrap_task_name,
+                task_code=bootstrap_task_code,
+                script_text=bootstrap_script,
+                payload=payload,
+            )
+            bootstrap_label = "workflow_definition_bootstrap_shell"
         bootstrap_relation = {
             "name": "",
             "code": bootstrap_relation_code,
@@ -1953,11 +1957,30 @@ class DolphinSchedulerClient:
             "executionType": execution_type,
         }
         return [
-            ("workflow_definition_bootstrap_shell", bootstrap_form),
+            (bootstrap_label, bootstrap_form),
             ("process_definition_minimal", minimal_form),
             ("process_definition_full_empty_graph", full_form),
             ("process_definition_other_params", fallback_form),
         ]
+
+    def _resolve_create_workflow_task_type(self, payload: Dict[str, Any]) -> str:
+        task_type = str(payload.get("task_type") or "").strip().upper()
+        if task_type in {"SQL", "SHELL"}:
+            return task_type
+        if str(payload.get("sql") or "").strip():
+            return "SQL"
+        return "SHELL"
+
+    def _resolve_create_workflow_task_name(self, payload: Dict[str, Any], task_type: str) -> str:
+        explicit_task_name = str(payload.get("task_name") or "").strip()
+        if explicit_task_name:
+            return explicit_task_name
+        bootstrap_task_name = str(payload.get("bootstrap_task_name") or "").strip()
+        if bootstrap_task_name:
+            return bootstrap_task_name
+        if task_type == "SQL":
+            return "__bootstrap_sql__"
+        return "__bootstrap_shell__"
 
     def _build_workflow_update_form(
         self,
