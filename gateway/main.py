@@ -20,11 +20,17 @@ def execute_request(request: GatewayRequest):
             data=result,
             error=None,
         )
+    debug_payload = None
+    error_payload = result
+    if isinstance(result, dict) and "debug" in result:
+        debug_payload = result.get("debug")
+        error_payload = dict(result)
+        error_payload.pop("debug", None)
     return build_response(
         False,
         request.country,
         request.action,
         request.request_id,
-        data=None,
-        error={"code": "DS_API_ERROR", "message": result},
+        data=debug_payload,
+        error={"code": "DS_API_ERROR", "message": error_payload},
     )
