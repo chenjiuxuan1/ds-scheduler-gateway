@@ -831,6 +831,176 @@ class DolphinSchedulerClient:
                 return True, item
         return False, {"message": f"datasource not found: {datasource}"}
 
+    def list_resources(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        resource_type = self._resolve_resource_type(payload)
+        full_name = self._resolve_resource_directory(payload, resource_type)
+        if not full_name:
+            return False, {"message": "failed to resolve resource directory"}
+
+        query = {
+            "fullName": full_name,
+            "type": resource_type,
+            "searchVal": payload.get("search_val", ""),
+            "pageNo": payload.get("page_no", 1),
+            "pageSize": payload.get("page_size", 100),
+        }
+        ok, result = self.request("GET", "/resources", query=query)
+        if not ok:
+            return False, result
+        return True, {
+            "resource_type": resource_type,
+            "full_name": full_name,
+            "page_no": self._safe_int(payload.get("page_no"), 1),
+            "page_size": self._safe_int(payload.get("page_size"), 100),
+            "search_val": str(payload.get("search_val") or "").strip(),
+            "result": result,
+            "items": self._extract_total_list(result),
+        }
+
+    def view_resource_file(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        resource_type = self._resolve_resource_type(payload)
+        resource_full_name = self._resolve_resource_file_full_name(payload, resource_type)
+        if not resource_full_name:
+            return False, {
+                "message": "view_resource_file requires full_name/resource_full_name or resolvable file_name",
+            }
+
+        skip_line_num = max(self._safe_int(payload.get("skip_line_num"), 0), 0)
+        limit = self._safe_int(payload.get("limit"), 200)
+        if limit <= 0:
+            limit = 200
+
+        ok, result = self.request(
+            "GET",
+            "/resources/view",
+            query={
+                "fullName": resource_full_name,
+                "skipLineNum": skip_line_num,
+                "limit": limit,
+            },
+        )
+        if not ok:
+            return False, result
+        content = self._extract_resource_content(result)
+        return True, {
+            "resource_type": resource_type,
+            "full_name": resource_full_name,
+            "skip_line_num": skip_line_num,
+            "limit": limit,
+            "content": content,
+            "result": result,
+        }
+
+    def search_resource_sql(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        resource_type = self._resolve_resource_type(payload)
+        sql_query = str(
+            payload.get("sql_query")
+            or payload.get("resource_sql")
+            or payload.get("sql")
+            or ""
+        ).strip()
+        if not sql_query:
+            return False, {"message": "search_resource_sql requires sql_query or sql"}
+
+        base_dir = self._resolve_resource_directory(payload, resource_type)
+        if not base_dir:
+            return False, {"message": "failed to resolve resource base directory"}
+
+        ok, tree_result = self.request(
+            "GET",
+            "/resources/list",
+            query={"type": resource_type},
+        )
+        if not ok:
+            return False, tree_result
+
+        all_items = self._flatten_resource_components(tree_result)
+        scoped_items = [
+            item for item in all_items
+            if not item.get("is_directory") and self._resource_in_scope(item.get("full_name", ""), base_dir)
+        ]
+
+        file_name_keyword = str(payload.get("file_name") or payload.get("search_val") or "").strip().lower()
+        if file_name_keyword:
+            scoped_items = [
+                item for item in scoped_items
+                if file_name_keyword in str(item.get("name") or "").lower()
+                or file_name_keyword in str(item.get("full_name") or "").lower()
+            ]
+
+        scoped_items = [
+            item for item in scoped_items
+            if self._is_text_resource_file(str(item.get("full_name") or ""))
+        ]
+
+        max_files = self._safe_int(payload.get("max_files"), 200)
+        max_files = min(max(max_files, 1), 2000)
+        max_results = self._safe_int(payload.get("max_results"), 20)
+        max_results = min(max(max_results, 1), 100)
+        content_limit = self._safe_int(payload.get("content_limit"), 500000)
+        content_limit = min(max(content_limit, 1000), 2_000_000)
+
+        scanned_files = 0
+        matched_files: list[Dict[str, Any]] = []
+        skipped_files: list[Dict[str, Any]] = []
+        truncated = False
+
+        for item in scoped_items:
+            if scanned_files >= max_files:
+                truncated = True
+                break
+
+            full_name = str(item.get("full_name") or "").strip()
+            scanned_files += 1
+            ok, view_result = self.request(
+                "GET",
+                "/resources/view",
+                query={
+                    "fullName": full_name,
+                    "skipLineNum": 0,
+                    "limit": content_limit,
+                },
+            )
+            if not ok:
+                skipped_files.append(
+                    {
+                        "full_name": full_name,
+                        "reason": "view_failed",
+                        "result": view_result,
+                    }
+                )
+                continue
+
+            content = self._extract_resource_content(view_result)
+            if not self._sql_text_matches(sql_query, content):
+                continue
+
+            matched_files.append(
+                {
+                    "name": str(item.get("name") or "").strip(),
+                    "full_name": full_name,
+                    "resource_type": resource_type,
+                    "size": self._safe_int(item.get("size")),
+                    "matched_excerpt": self._build_match_excerpt(content, sql_query),
+                }
+            )
+            if len(matched_files) >= max_results:
+                truncated = truncated or scanned_files < len(scoped_items)
+                break
+
+        return True, {
+            "resource_type": resource_type,
+            "base_dir": base_dir,
+            "sql_query": sql_query,
+            "file_name_keyword": file_name_keyword,
+            "scanned_file_count": scanned_files,
+            "candidate_file_count": len(scoped_items),
+            "matched_file_count": len(matched_files),
+            "truncated": truncated,
+            "matched_files": matched_files,
+            "skipped_files": skipped_files[:20],
+        }
+
     def _resolve_task_instance(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         process_instance_id = self._safe_int(
             payload.get("process_instance_id")
@@ -3395,6 +3565,196 @@ class DolphinSchedulerClient:
         if normalized_int in (0, 1):
             return "0" if normalized_int == 0 else "1"
         return "1"
+
+    def _resolve_resource_type(self, payload: Dict[str, Any]) -> str:
+        raw_type = str(
+            payload.get("resource_type")
+            or payload.get("type")
+            or payload.get("resource_kind")
+            or "FILE"
+        ).strip().upper()
+        aliases = {
+            "FILE": "FILE",
+            "FILES": "FILE",
+            "RESOURCE": "FILE",
+            "RESOURCES": "FILE",
+            "UDF": "UDF",
+            "FUNCTION": "UDF",
+            "FUNCTIONS": "UDF",
+        }
+        return aliases.get(raw_type, "FILE")
+
+    def _query_resource_base_dir(self, resource_type: str) -> str:
+        ok, result = self.request(
+            "GET",
+            "/resources/base-dir",
+            query={"type": resource_type},
+        )
+        if not ok:
+            return ""
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, str):
+                return data.strip()
+        return ""
+
+    def _resolve_resource_directory(self, payload: Dict[str, Any], resource_type: str) -> str:
+        for key in ("current_dir", "resource_dir", "resource_full_name", "full_name"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+        return self._query_resource_base_dir(resource_type)
+
+    def _resolve_resource_file_full_name(
+        self,
+        payload: Dict[str, Any],
+        resource_type: str,
+    ) -> str:
+        explicit = str(
+            payload.get("resource_full_name")
+            or payload.get("full_name")
+            or ""
+        ).strip()
+        if explicit:
+            return explicit
+
+        file_name = str(payload.get("file_name") or payload.get("resource_name") or "").strip()
+        if not file_name:
+            return ""
+
+        current_dir = self._resolve_resource_directory(payload, resource_type)
+        if not current_dir:
+            return ""
+
+        ok, result = self.request(
+            "GET",
+            "/resources",
+            query={
+                "fullName": current_dir,
+                "type": resource_type,
+                "searchVal": file_name,
+                "pageNo": 1,
+                "pageSize": max(self._safe_int(payload.get("page_size"), 100), 20),
+            },
+        )
+        if not ok:
+            return ""
+
+        candidates = self._extract_total_list(result)
+        for item in candidates:
+            item_name = str(item.get("fileName") or item.get("name") or item.get("alias") or "").strip()
+            item_full_name = str(item.get("fullName") or item.get("full_name") or "").strip()
+            if item_name == file_name and item_full_name:
+                return item_full_name
+        return ""
+
+    def _extract_resource_content(self, result: Any) -> str:
+        if not isinstance(result, dict):
+            return ""
+        data = result.get("data")
+        if isinstance(data, dict):
+            content = data.get("content")
+            if isinstance(content, str):
+                return content
+        if isinstance(data, str):
+            return data
+        return ""
+
+    def _flatten_resource_components(self, result: Any) -> list[Dict[str, Any]]:
+        if isinstance(result, dict):
+            data = result.get("data")
+        else:
+            data = result
+        if not isinstance(data, list):
+            return []
+
+        flattened: list[Dict[str, Any]] = []
+
+        def visit(node: Dict[str, Any]) -> None:
+            if not isinstance(node, dict):
+                return
+            full_name = str(node.get("fullName") or "").strip()
+            current_dir = str(node.get("currentDir") or "").strip()
+            name = str(node.get("name") or "").strip()
+            is_directory = bool(node.get("isDirctory"))
+            flattened.append(
+                {
+                    "name": name,
+                    "full_name": full_name,
+                    "current_dir": current_dir,
+                    "is_directory": is_directory,
+                    "type": str(node.get("type") or "").strip(),
+                    "description": str(node.get("description") or "").strip(),
+                    "children": node.get("children") or [],
+                }
+            )
+            children = node.get("children")
+            if isinstance(children, list):
+                for child in children:
+                    visit(child)
+
+        for item in data:
+            visit(item)
+        return flattened
+
+    def _resource_in_scope(self, full_name: str, scope_dir: str) -> bool:
+        normalized_full_name = str(full_name or "").rstrip("/")
+        normalized_scope = str(scope_dir or "").rstrip("/")
+        if not normalized_scope:
+            return True
+        return normalized_full_name == normalized_scope or normalized_full_name.startswith(normalized_scope + "/")
+
+    def _is_text_resource_file(self, full_name: str) -> bool:
+        normalized = str(full_name or "").lower()
+        for suffix in (
+            ".sql",
+            ".hql",
+            ".txt",
+            ".sh",
+            ".py",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".xml",
+            ".cfg",
+            ".conf",
+            ".properties",
+            ".ini",
+            ".csv",
+            ".md",
+        ):
+            if normalized.endswith(suffix):
+                return True
+        return False
+
+    def _normalize_sql_search_text(self, text: str) -> str:
+        normalized = str(text or "").lower()
+        normalized = re.sub(r"[\s`\"']", "", normalized)
+        return normalized
+
+    def _sql_text_matches(self, sql_query: str, content: str) -> bool:
+        normalized_query = self._normalize_sql_search_text(sql_query)
+        normalized_content = self._normalize_sql_search_text(content)
+        if not normalized_query or not normalized_content:
+            return False
+        return normalized_query in normalized_content
+
+    def _build_match_excerpt(self, content: str, sql_query: str, width: int = 320) -> str:
+        original = str(content or "")
+        if not original:
+            return ""
+
+        probe = str(sql_query or "").strip().lower()
+        if probe:
+            lowered = original.lower()
+            index = lowered.find(probe)
+            if index >= 0:
+                start = max(index - width // 2, 0)
+                end = min(index + width // 2, len(original))
+                return original[start:end]
+
+        lines = [line for line in original.splitlines() if line.strip()]
+        return "\n".join(lines[:8])[:width]
 
     def _resolve_sql_task_datasource_value(
         self,

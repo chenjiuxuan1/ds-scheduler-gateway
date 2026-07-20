@@ -42,6 +42,9 @@ SUPPORTED_ACTIONS = {
     "list_datasources",
     "get_datasource",
     "extract_task_runtime_config",
+    "list_resources",
+    "view_resource_file",
+    "search_resource_sql",
 }
 
 

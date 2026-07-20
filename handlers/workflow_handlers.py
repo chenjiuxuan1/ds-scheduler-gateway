@@ -39,5 +39,8 @@ def dispatch_action(client: DolphinSchedulerClient, action: str, payload: Dict[s
         "list_datasources": lambda: client.list_datasources(payload),
         "get_datasource": lambda: client.get_datasource(payload),
         "extract_task_runtime_config": lambda: client.extract_task_runtime_config(payload),
+        "list_resources": lambda: client.list_resources(payload),
+        "view_resource_file": lambda: client.view_resource_file(payload),
+        "search_resource_sql": lambda: client.search_resource_sql(payload),
     }
     return handlers[action]()
