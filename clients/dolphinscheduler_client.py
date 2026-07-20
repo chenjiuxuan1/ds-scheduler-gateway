@@ -3680,7 +3680,7 @@ class DolphinSchedulerClient:
             full_name = str(node.get("fullName") or "").strip()
             current_dir = str(node.get("currentDir") or "").strip()
             name = str(node.get("name") or "").strip()
-            is_directory = bool(node.get("isDirctory"))
+            is_directory = self._resource_node_is_directory(node)
             flattened.append(
                 {
                     "name": name,
@@ -3720,7 +3720,7 @@ class DolphinSchedulerClient:
 
         target = self._find_resource_tree_node(tree_items, scope_dir)
         if target:
-            if not bool(target.get("isDirctory")):
+            if not self._resource_node_is_directory(target):
                 return [self._normalize_resource_component(target)]
             children = target.get("children")
             if isinstance(children, list):
@@ -3770,11 +3770,26 @@ class DolphinSchedulerClient:
             "name": str(node.get("name") or "").strip(),
             "full_name": str(node.get("fullName") or "").strip(),
             "current_dir": str(node.get("currentDir") or "").strip(),
-            "is_directory": bool(node.get("isDirctory")),
+            "is_directory": self._resource_node_is_directory(node),
             "type": str(node.get("type") or "").strip(),
             "description": str(node.get("description") or "").strip(),
             "children": node.get("children") or [],
         }
+
+    def _resource_node_is_directory(self, node: Dict[str, Any]) -> bool:
+        for key in ("isDirctory", "dirctory", "isDirectory"):
+            value = node.get(key)
+            if isinstance(value, bool):
+                return value
+            if value in (0, 1):
+                return bool(value)
+            if isinstance(value, str) and value.strip():
+                normalized = value.strip().lower()
+                if normalized in {"true", "1", "yes"}:
+                    return True
+                if normalized in {"false", "0", "no"}:
+                    return False
+        return False
 
     def _resource_in_scope(self, full_name: str, scope_dir: str) -> bool:
         normalized_full_name = str(full_name or "").rstrip("/")
