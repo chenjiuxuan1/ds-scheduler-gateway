@@ -875,16 +875,18 @@ class DolphinSchedulerClient:
                 "message": "view_resource_file requires full_name/resource_full_name or resolvable file_name",
             }
 
+        tenant_code = self._resolve_resource_tenant_code(payload)
         skip_line_num = max(self._safe_int(payload.get("skip_line_num"), 0), 0)
-        limit = self._safe_int(payload.get("limit"), 200)
-        if limit <= 0:
-            limit = 200
+        limit = self._safe_int(payload.get("limit"), -1)
+        if limit == 0:
+            limit = -1
 
         ok, result = self.request(
             "GET",
             "/resources/view",
             query={
                 "fullName": resource_full_name,
+                "tenantCode": tenant_code,
                 "skipLineNum": skip_line_num,
                 "limit": limit,
             },
@@ -903,6 +905,7 @@ class DolphinSchedulerClient:
 
     def search_resource_sql(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         resource_type = self._resolve_resource_type(payload)
+        tenant_code = self._resolve_resource_tenant_code(payload)
         sql_query = str(
             payload.get("sql_query")
             or payload.get("resource_sql")
@@ -965,6 +968,7 @@ class DolphinSchedulerClient:
                 "/resources/view",
                 query={
                     "fullName": full_name,
+                    "tenantCode": tenant_code,
                     "skipLineNum": 0,
                     "limit": content_limit,
                 },
@@ -3613,6 +3617,15 @@ class DolphinSchedulerClient:
                 return value.rstrip("/")
         return ""
 
+    def _resolve_resource_tenant_code(self, payload: Dict[str, Any]) -> str:
+        tenant_code = str(
+            payload.get("tenant_code")
+            or payload.get("tenantCode")
+            or self.config.tenant_code
+            or "default"
+        ).strip()
+        return tenant_code or "default"
+
     def _resolve_resource_file_full_name(
         self,
         payload: Dict[str, Any],
@@ -3660,9 +3673,10 @@ class DolphinSchedulerClient:
             return ""
         data = result.get("data")
         if isinstance(data, dict):
-            content = data.get("content")
-            if isinstance(content, str):
-                return content
+            for key in ("content", "resourceContent", "fileContent"):
+                content = data.get(key)
+                if isinstance(content, str):
+                    return content
         if isinstance(data, str):
             return data
         return ""
@@ -3732,9 +3746,15 @@ class DolphinSchedulerClient:
             return []
 
         all_items = self._flatten_resource_components({"data": tree_items})
+        immediate_children = [
+            item for item in all_items
+            if self._resource_parent_dir(item.get("full_name", "")) == scope_dir
+        ]
+        if immediate_children:
+            return immediate_children
         return [
             item for item in all_items
-            if self._resource_in_scope(item.get("full_name", ""), scope_dir)
+            if item.get("full_name", "") == scope_dir
         ]
 
     def _find_resource_tree_node(
@@ -3747,7 +3767,11 @@ class DolphinSchedulerClient:
             return None
 
         def visit(node: Dict[str, Any]) -> Dict[str, Any] | None:
-            node_full_name = str(node.get("fullName") or "").rstrip("/")
+            node_full_name = str(
+                node.get("fullName")
+                or node.get("full_name")
+                or ""
+            ).rstrip("/")
             if node_full_name == target:
                 return node
             children = node.get("children")
@@ -3766,18 +3790,22 @@ class DolphinSchedulerClient:
         return None
 
     def _normalize_resource_component(self, node: Dict[str, Any]) -> Dict[str, Any]:
+        full_name = str(node.get("fullName") or node.get("full_name") or "").strip()
+        current_dir = str(node.get("currentDir") or node.get("current_dir") or "").strip()
+        name = str(node.get("name") or node.get("fileName") or node.get("alias") or "").strip()
+        children = node.get("children") or []
         return {
-            "name": str(node.get("name") or "").strip(),
-            "full_name": str(node.get("fullName") or "").strip(),
-            "current_dir": str(node.get("currentDir") or "").strip(),
+            "name": name,
+            "full_name": full_name,
+            "current_dir": current_dir,
             "is_directory": self._resource_node_is_directory(node),
             "type": str(node.get("type") or "").strip(),
             "description": str(node.get("description") or "").strip(),
-            "children": node.get("children") or [],
+            "children": children,
         }
 
     def _resource_node_is_directory(self, node: Dict[str, Any]) -> bool:
-        for key in ("isDirctory", "dirctory", "isDirectory"):
+        for key in ("isDirctory", "dirctory", "isDirectory", "is_directory"):
             value = node.get(key)
             if isinstance(value, bool):
                 return value
@@ -3797,6 +3825,12 @@ class DolphinSchedulerClient:
         if not normalized_scope:
             return True
         return normalized_full_name == normalized_scope or normalized_full_name.startswith(normalized_scope + "/")
+
+    def _resource_parent_dir(self, full_name: str) -> str:
+        normalized = str(full_name or "").rstrip("/")
+        if not normalized or "/" not in normalized:
+            return ""
+        return normalized.rsplit("/", 1)[0]
 
     def _is_text_resource_file(self, full_name: str) -> bool:
         normalized = str(full_name or "").lower()
