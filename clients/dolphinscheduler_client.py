@@ -833,28 +833,38 @@ class DolphinSchedulerClient:
 
     def list_resources(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         resource_type = self._resolve_resource_type(payload)
-        full_name = self._resolve_resource_directory(payload, resource_type)
-        if not full_name:
-            return False, {"message": "failed to resolve resource directory"}
-
-        query = {
-            "fullName": full_name,
-            "type": resource_type,
-            "searchVal": payload.get("search_val", ""),
-            "pageNo": payload.get("page_no", 1),
-            "pageSize": payload.get("page_size", 100),
-        }
-        ok, result = self.request("GET", "/resources", query=query)
+        full_name = self._resolve_resource_scope(payload)
+        ok, result = self.request(
+            "GET",
+            "/resources/list",
+            query={"type": resource_type},
+        )
         if not ok:
             return False, result
+        tree_items = self._extract_resource_tree_items(result)
+        scoped_items = self._list_resource_scope_items(tree_items, full_name)
+        search_val = str(payload.get("search_val") or "").strip().lower()
+        if search_val:
+            scoped_items = [
+                item for item in scoped_items
+                if search_val in str(item.get("name") or "").lower()
+                or search_val in str(item.get("full_name") or "").lower()
+            ]
+        page_no = max(self._safe_int(payload.get("page_no"), 1), 1)
+        page_size = self._safe_int(payload.get("page_size"), 100)
+        if page_size <= 0:
+            page_size = 100
+        start = (page_no - 1) * page_size
+        end = start + page_size
         return True, {
             "resource_type": resource_type,
             "full_name": full_name,
-            "page_no": self._safe_int(payload.get("page_no"), 1),
-            "page_size": self._safe_int(payload.get("page_size"), 100),
+            "page_no": page_no,
+            "page_size": page_size,
             "search_val": str(payload.get("search_val") or "").strip(),
             "result": result,
-            "items": self._extract_total_list(result),
+            "items": scoped_items[start:end],
+            "total": len(scoped_items),
         }
 
     def view_resource_file(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
@@ -902,9 +912,7 @@ class DolphinSchedulerClient:
         if not sql_query:
             return False, {"message": "search_resource_sql requires sql_query or sql"}
 
-        base_dir = self._resolve_resource_directory(payload, resource_type)
-        if not base_dir:
-            return False, {"message": "failed to resolve resource base directory"}
+        base_dir = self._resolve_resource_scope(payload)
 
         ok, tree_result = self.request(
             "GET",
@@ -3598,12 +3606,12 @@ class DolphinSchedulerClient:
                 return data.strip()
         return ""
 
-    def _resolve_resource_directory(self, payload: Dict[str, Any], resource_type: str) -> str:
+    def _resolve_resource_scope(self, payload: Dict[str, Any]) -> str:
         for key in ("current_dir", "resource_dir", "resource_full_name", "full_name"):
             value = str(payload.get(key) or "").strip()
             if value:
-                return value
-        return self._query_resource_base_dir(resource_type)
+                return value.rstrip("/")
+        return ""
 
     def _resolve_resource_file_full_name(
         self,
@@ -3622,29 +3630,28 @@ class DolphinSchedulerClient:
         if not file_name:
             return ""
 
-        current_dir = self._resolve_resource_directory(payload, resource_type)
-        if not current_dir:
-            return ""
-
+        current_dir = self._resolve_resource_scope(payload)
         ok, result = self.request(
             "GET",
-            "/resources",
-            query={
-                "fullName": current_dir,
-                "type": resource_type,
-                "searchVal": file_name,
-                "pageNo": 1,
-                "pageSize": max(self._safe_int(payload.get("page_size"), 100), 20),
-            },
+            "/resources/list",
+            query={"type": resource_type},
         )
         if not ok:
             return ""
 
-        candidates = self._extract_total_list(result)
+        candidates = self._flatten_resource_components(result)
         for item in candidates:
+            if item.get("is_directory"):
+                continue
             item_name = str(item.get("fileName") or item.get("name") or item.get("alias") or "").strip()
             item_full_name = str(item.get("fullName") or item.get("full_name") or "").strip()
+            if current_dir and not self._resource_in_scope(item_full_name, current_dir):
+                continue
+            if item_full_name == file_name:
+                return item_full_name
             if item_name == file_name and item_full_name:
+                return item_full_name
+            if item_full_name.endswith("/" + file_name):
                 return item_full_name
         return ""
 
@@ -3661,11 +3668,8 @@ class DolphinSchedulerClient:
         return ""
 
     def _flatten_resource_components(self, result: Any) -> list[Dict[str, Any]]:
-        if isinstance(result, dict):
-            data = result.get("data")
-        else:
-            data = result
-        if not isinstance(data, list):
+        data = self._extract_resource_tree_items(result)
+        if not data:
             return []
 
         flattened: list[Dict[str, Any]] = []
@@ -3696,6 +3700,81 @@ class DolphinSchedulerClient:
         for item in data:
             visit(item)
         return flattened
+
+    def _extract_resource_tree_items(self, result: Any) -> list[Dict[str, Any]]:
+        if isinstance(result, dict):
+            data = result.get("data")
+        else:
+            data = result
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
+    def _list_resource_scope_items(
+        self,
+        tree_items: list[Dict[str, Any]],
+        scope_dir: str,
+    ) -> list[Dict[str, Any]]:
+        if not scope_dir:
+            return [self._normalize_resource_component(item) for item in tree_items]
+
+        target = self._find_resource_tree_node(tree_items, scope_dir)
+        if target:
+            if not bool(target.get("isDirctory")):
+                return [self._normalize_resource_component(target)]
+            children = target.get("children")
+            if isinstance(children, list):
+                return [
+                    self._normalize_resource_component(child)
+                    for child in children
+                    if isinstance(child, dict)
+                ]
+            return []
+
+        all_items = self._flatten_resource_components({"data": tree_items})
+        return [
+            item for item in all_items
+            if self._resource_in_scope(item.get("full_name", ""), scope_dir)
+        ]
+
+    def _find_resource_tree_node(
+        self,
+        tree_items: list[Dict[str, Any]],
+        full_name: str,
+    ) -> Dict[str, Any] | None:
+        target = str(full_name or "").rstrip("/")
+        if not target:
+            return None
+
+        def visit(node: Dict[str, Any]) -> Dict[str, Any] | None:
+            node_full_name = str(node.get("fullName") or "").rstrip("/")
+            if node_full_name == target:
+                return node
+            children = node.get("children")
+            if isinstance(children, list):
+                for child in children:
+                    if isinstance(child, dict):
+                        found = visit(child)
+                        if found:
+                            return found
+            return None
+
+        for item in tree_items:
+            found = visit(item)
+            if found:
+                return found
+        return None
+
+    def _normalize_resource_component(self, node: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "name": str(node.get("name") or "").strip(),
+            "full_name": str(node.get("fullName") or "").strip(),
+            "current_dir": str(node.get("currentDir") or "").strip(),
+            "is_directory": bool(node.get("isDirctory")),
+            "type": str(node.get("type") or "").strip(),
+            "description": str(node.get("description") or "").strip(),
+            "children": node.get("children") or [],
+        }
 
     def _resource_in_scope(self, full_name: str, scope_dir: str) -> bool:
         normalized_full_name = str(full_name or "").rstrip("/")
