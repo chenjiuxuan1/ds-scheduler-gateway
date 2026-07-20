@@ -877,9 +877,7 @@ class DolphinSchedulerClient:
 
         tenant_code = self._resolve_resource_tenant_code(payload)
         skip_line_num = max(self._safe_int(payload.get("skip_line_num"), 0), 0)
-        limit = self._safe_int(payload.get("limit"), -1)
-        if limit == 0:
-            limit = -1
+        limit = self._resolve_resource_view_limit(payload)
 
         ok, result = self.request(
             "GET",
@@ -970,7 +968,7 @@ class DolphinSchedulerClient:
                     "fullName": full_name,
                     "tenantCode": tenant_code,
                     "skipLineNum": 0,
-                    "limit": content_limit,
+                    "limit": -1,
                 },
             )
             if not ok:
@@ -3616,6 +3614,19 @@ class DolphinSchedulerClient:
             if value:
                 return value.rstrip("/")
         return ""
+
+    def _resolve_resource_view_limit(self, payload: Dict[str, Any], default: int = -1) -> int:
+        if "limit" not in payload or payload.get("limit") in (None, ""):
+            return default
+        limit = self._safe_int(payload.get("limit"), default)
+        if limit == 0:
+            return default
+        # n8n normalizer currently injects 200 as a generic default. For DS resource
+        # file reads, MX live behavior shows positive paging can return empty content,
+        # while -1 returns the real file body.
+        if limit == 200:
+            return -1
+        return limit
 
     def _resolve_resource_tenant_code(self, payload: Dict[str, Any]) -> str:
         tenant_code = str(
