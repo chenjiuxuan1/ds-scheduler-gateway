@@ -688,6 +688,7 @@ class DolphinSchedulerClient:
             filter_workflow_codes = [filter_workflow_codes]
         filter_workflow_codes = [str(c).strip() for c in filter_workflow_codes if str(c).strip()]
 
+        # Step 1: Get all schedules
         ok, schedules_result = self.list_schedules(
             {"project_code": project_code, "page_size": 200}
         )
@@ -698,60 +699,81 @@ class DolphinSchedulerClient:
         if not isinstance(total_list, list):
             total_list = []
 
-        checked_workflows = []
-        stuck_workflows = []
-
+        # Build a map of workflow_code -> schedule info
+        schedule_map = {}
         for schedule in total_list:
             wf_code = str(
                 schedule.get("processDefinitionCode")
                 or schedule.get("workflowDefinitionCode")
                 or ""
             ).strip()
-            wf_name = str(
-                schedule.get("processDefinitionName")
-                or schedule.get("workflowDefinitionName")
-                or schedule.get("workflowName", "")
-            ).strip()
-            schedule_id = schedule.get("id")
-            schedule_status = schedule.get("releaseState") or schedule.get("scheduleReleaseState") or ""
-
             if not wf_code:
                 continue
-
             if filter_workflow_codes and wf_code not in filter_workflow_codes:
                 continue
+            schedule_map[wf_code] = {
+                "workflow_code": wf_code,
+                "workflow_name": str(
+                    schedule.get("processDefinitionName")
+                    or schedule.get("workflowDefinitionName")
+                    or schedule.get("workflowName", "")
+                ).strip() or "-",
+                "schedule_id": schedule.get("id"),
+                "schedule_status": schedule.get("releaseState") or schedule.get("scheduleReleaseState") or "",
+            }
 
-            ok, instances_result = self.request(
-                "GET",
-                f"/projects/{project_code}/workflow-instances",
-                query={
-                    "pageNo": 1,
-                    "pageSize": page_size,
-                    "processDefinitionCode": wf_code,
-                },
-            )
-            if not ok:
+        if not schedule_map:
+            return True, {
+                "project_code": project_code,
+                "checked_workflows": [],
+                "stuck_workflows": [],
+                "stuck_count": 0,
+                "consecutive_threshold": consecutive_threshold,
+                "total_checked": 0,
+            }
+
+        # Step 2: Fetch all instances for the project in one call (without workflow filter)
+        ok, all_instances_result = self.request(
+            "GET",
+            f"/projects/{project_code}/workflow-instances",
+            query={"pageNo": 1, "pageSize": page_size * 10},
+        )
+        if not ok:
+            return False, all_instances_result
+
+        all_instance_list = all_instances_result.get("data", {}).get("totalList", [])
+        if not isinstance(all_instance_list, list):
+            all_instance_list = []
+
+        # Step 3: Group instances by workflow code
+        instances_by_workflow = {}
+        for inst in all_instance_list:
+            wf_code = str(inst.get("processDefinitionCode") or "").strip()
+            if not wf_code or wf_code not in schedule_map:
                 continue
+            if wf_code not in instances_by_workflow:
+                instances_by_workflow[wf_code] = []
+            instances_by_workflow[wf_code].append(inst)
 
-            instance_list = instances_result.get("data", {}).get("totalList", [])
-            if not isinstance(instance_list, list):
-                instance_list = []
+        # Step 4: For each workflow, sort by endTime desc and check consecutive failures
+        checked_workflows = []
+        stuck_workflows = []
+
+        for wf_code, schedule_info in schedule_map.items():
+            instance_list = instances_by_workflow.get(wf_code, [])
+            # Sort by endTime descending (most recent first)
+            def _instance_sort_key(inst):
+                return str(inst.get("endTime") or inst.get("startTime") or "")
+            instance_list.sort(key=_instance_sort_key, reverse=True)
+            instance_list = instance_list[:page_size]
 
             if not instance_list:
                 checked_workflows.append({
-                    "workflow_code": wf_code,
-                    "workflow_name": wf_name or "-",
-                    "schedule_id": schedule_id,
-                    "schedule_status": schedule_status,
+                    **schedule_info,
                     "total_instances_checked": 0,
                     "consecutive_failures": 0,
                 })
                 continue
-
-            def _instance_sort_key(inst):
-                return str(inst.get("endTime") or inst.get("startTime") or "")
-
-            instance_list.sort(key=_instance_sort_key, reverse=True)
 
             consecutive_failures = 0
             total_checked = 0
@@ -776,20 +798,14 @@ class DolphinSchedulerClient:
                     break
 
             checked_workflows.append({
-                "workflow_code": wf_code,
-                "workflow_name": wf_name or "-",
-                "schedule_id": schedule_id,
-                "schedule_status": schedule_status,
+                **schedule_info,
                 "total_instances_checked": total_checked,
                 "consecutive_failures": consecutive_failures,
             })
 
             if consecutive_failures >= consecutive_threshold:
                 stuck_workflows.append({
-                    "workflow_code": wf_code,
-                    "workflow_name": wf_name or "-",
-                    "schedule_id": schedule_id,
-                    "schedule_status": schedule_status,
+                    **schedule_info,
                     "consecutive_failures": consecutive_failures,
                     "total_checked": total_checked,
                     "recent_failures": failure_details,
@@ -803,7 +819,6 @@ class DolphinSchedulerClient:
             "consecutive_threshold": consecutive_threshold,
             "total_checked": len(checked_workflows),
         }
-
     def list_task_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
         process_instance_id = (
