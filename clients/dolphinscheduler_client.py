@@ -748,7 +748,7 @@ class DolphinSchedulerClient:
         # Step 3: Group instances by workflow code
         instances_by_workflow = {}
         for inst in all_instance_list:
-            wf_code = str(inst.get("processDefinitionCode") or "").strip()
+            wf_code = str(inst.get("workflowDefinitionCode") or inst.get("processDefinitionCode") or "").strip()
             if not wf_code or wf_code not in schedule_map:
                 continue
             if wf_code not in instances_by_workflow:
@@ -774,6 +774,16 @@ class DolphinSchedulerClient:
                     "consecutive_failures": 0,
                 })
                 continue
+            
+            # Derive workflow name from instance name (strip timestamp suffix)
+            instance_name = str(instance_list[0].get("name") or "").strip()
+            if instance_name and schedule_info["workflow_name"] == "-":
+                # name format: "workflowName-YYYYMMDDHHmmssSSS"
+                for sep in ("-", "_"):
+                    parts = instance_name.rsplit(sep, 1)
+                    if len(parts) == 2 and len(parts[1]) >= 14 and parts[1][:8].isdigit():
+                        schedule_info["workflow_name"] = parts[0]
+                        break
 
             consecutive_failures = 0
             total_checked = 0
