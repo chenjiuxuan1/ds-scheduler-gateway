@@ -732,18 +732,32 @@ class DolphinSchedulerClient:
                 "total_checked": 0,
             }
 
-        # Step 2: Fetch all instances for the project in one call (without workflow filter)
-        ok, all_instances_result = self.request(
-            "GET",
-            f"/projects/{project_code}/workflow-instances",
-            query={"pageNo": 1, "pageSize": page_size * 10},
-        )
-        if not ok:
-            return False, all_instances_result
+        # Step 2: Fetch all instances for the project with pagination
+        # Fetch up to 1000 instances to cover all workflows
+        all_instance_list = []
+        fetch_page = 1
+        fetch_page_size = min(page_size * 10, 200)
+        max_instances = min(page_size * 10 * 5, 1000)
+        while len(all_instance_list) < max_instances:
+            ok, page_result = self.request(
+                "GET",
+                f"/projects/{project_code}/workflow-instances",
+                query={"pageNo": fetch_page, "pageSize": fetch_page_size},
+            )
+            if not ok:
+                if fetch_page == 1:
+                    return False, page_result
+                break
 
-        all_instance_list = all_instances_result.get("data", {}).get("totalList", [])
-        if not isinstance(all_instance_list, list):
-            all_instance_list = []
+            page_list = page_result.get("data", {}).get("totalList", [])
+            if not isinstance(page_list, list) or not page_list:
+                break
+
+            all_instance_list.extend(page_list)
+            total_count = page_result.get("data", {}).get("total", 0) or 0
+            if len(all_instance_list) >= total_count:
+                break
+            fetch_page += 1
 
         # Step 3: Group instances by workflow code
         instances_by_workflow = {}
@@ -821,18 +835,6 @@ class DolphinSchedulerClient:
                     "recent_failures": failure_details,
                 })
 
-        # Debug: sample raw instances
-        debug_raw = []
-        if all_instance_list:
-            for inst in all_instance_list[:5]:
-                codes = {
-                    "id": inst.get("id"),
-                    "wf_code": inst.get("workflowDefinitionCode"),
-                    "name": inst.get("name"),
-                    "state": inst.get("stateDesc") or inst.get("state"),
-                }
-                debug_raw.append(codes)
-
         return True, {
             "project_code": project_code,
             "checked_workflows": checked_workflows,
@@ -840,13 +842,6 @@ class DolphinSchedulerClient:
             "stuck_count": len(stuck_workflows),
             "consecutive_threshold": consecutive_threshold,
             "total_checked": len(checked_workflows),
-            "_debug": {
-                "raw_instance_count": len(all_instance_list),
-                "raw_total": all_instances_result.get("data", {}).get("total"),
-                "matched_instances": sum(wf["total_instances_checked"] for wf in checked_workflows),
-                "schedule_wf_codes": list(schedule_map.keys())[:5],
-                "sample_instances": debug_raw,
-            },
         }
     def list_task_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
