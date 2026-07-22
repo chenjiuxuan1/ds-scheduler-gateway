@@ -842,6 +842,11 @@ class DolphinSchedulerClient:
             "stuck_count": len(stuck_workflows),
             "consecutive_threshold": consecutive_threshold,
             "total_checked": len(checked_workflows),
+            "_debug": {
+                "pages_fetched": fetch_page,
+                "total_raw_instances": len(all_instance_list),
+                "matched_count": sum(wf["total_instances_checked"] for wf in checked_workflows),
+            },
         }
     def list_task_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
