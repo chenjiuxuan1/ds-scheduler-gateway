@@ -821,6 +821,18 @@ class DolphinSchedulerClient:
                     "recent_failures": failure_details,
                 })
 
+        # Debug: sample raw instances
+        debug_raw = []
+        if all_instance_list:
+            for inst in all_instance_list[:5]:
+                codes = {
+                    "id": inst.get("id"),
+                    "wf_code": inst.get("workflowDefinitionCode"),
+                    "name": inst.get("name"),
+                    "state": inst.get("stateDesc") or inst.get("state"),
+                }
+                debug_raw.append(codes)
+
         return True, {
             "project_code": project_code,
             "checked_workflows": checked_workflows,
@@ -828,6 +840,13 @@ class DolphinSchedulerClient:
             "stuck_count": len(stuck_workflows),
             "consecutive_threshold": consecutive_threshold,
             "total_checked": len(checked_workflows),
+            "_debug": {
+                "raw_instance_count": len(all_instance_list),
+                "raw_total": all_instances_result.get("data", {}).get("total"),
+                "matched_instances": sum(wf["total_instances_checked"] for wf in checked_workflows),
+                "schedule_wf_codes": list(schedule_map.keys())[:5],
+                "sample_instances": debug_raw,
+            },
         }
     def list_task_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
