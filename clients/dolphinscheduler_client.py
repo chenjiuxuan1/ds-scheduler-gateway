@@ -835,20 +835,6 @@ class DolphinSchedulerClient:
                     "recent_failures": failure_details,
                 })
 
-        # Debug: check wf_code matching
-        schedule_keys = list(schedule_map.keys())[:5]
-        unique_instance_wf = set()
-        for inst in all_instance_list:
-            code = str(inst.get("workflowDefinitionCode") or "").strip()
-            if code:
-                unique_instance_wf.add(code)
-        instance_wf_sample = list(unique_instance_wf)[:10]
-        # Check if 173196945137483 is in schedule_map
-        test_key = "173196945137483"
-        test_in_map = test_key in schedule_map
-        # Count how many instances have this key
-        test_count = sum(1 for inst in all_instance_list if str(inst.get("workflowDefinitionCode") or "") == test_key)
-
         return True, {
             "project_code": project_code,
             "checked_workflows": checked_workflows,
@@ -856,15 +842,6 @@ class DolphinSchedulerClient:
             "stuck_count": len(stuck_workflows),
             "consecutive_threshold": consecutive_threshold,
             "total_checked": len(checked_workflows),
-            "_debug": {
-                "pages_fetched": fetch_page,
-                "total_raw_instances": len(all_instance_list),
-                "matched_count": sum(wf["total_instances_checked"] for wf in checked_workflows),
-                "schedule_keys_sample": schedule_keys,
-                "instance_wf_sample": instance_wf_sample,
-                "test_key_in_map": test_in_map,
-                "test_key_count_in_instances": test_count,
-            },
         }
     def list_task_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
