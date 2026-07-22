@@ -22,6 +22,7 @@ def dispatch_action(client: DolphinSchedulerClient, action: str, payload: Dict[s
         "offline_workflow": lambda: client.release_workflow(payload, "OFFLINE"),
         "trigger_workflow": lambda: client.trigger_workflow(payload),
         "list_instances": lambda: client.list_instances(payload),
+        "check_failed_instances": lambda: client.check_failed_instances(payload),
         "get_instance": lambda: client.get_instance(payload),
         "list_task_instances": lambda: client.list_task_instances(payload),
         "get_task_log": lambda: client.get_task_log(payload),

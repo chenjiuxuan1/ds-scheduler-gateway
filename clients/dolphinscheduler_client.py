@@ -666,6 +666,144 @@ class DolphinSchedulerClient:
             query=query,
         )
 
+
+    def check_failed_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        """
+        Check for workflows that have been consistently failing.
+
+        Detects "stuck" schedules where the last N consecutive
+        scheduled runs have all failed.
+
+        Payload:
+        - project_code: str (optional, defaults to config project)
+        - workflow_codes: list[str] (optional, specific workflows to check)
+        - consecutive_failures: int (optional, default 3, threshold for stuck)
+        - page_size: int (optional, default 20, instances to fetch per workflow)
+        """
+        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        consecutive_threshold = int(payload.get("consecutive_failures", 3))
+        page_size = int(payload.get("page_size", 20))
+        filter_workflow_codes = payload.get("workflow_codes", [])
+        if isinstance(filter_workflow_codes, str):
+            filter_workflow_codes = [filter_workflow_codes]
+        filter_workflow_codes = [str(c).strip() for c in filter_workflow_codes if str(c).strip()]
+
+        ok, schedules_result = self.list_schedules(
+            {"project_code": project_code, "page_size": 200}
+        )
+        if not ok:
+            return False, schedules_result
+
+        total_list = schedules_result.get("data", {}).get("totalList", [])
+        if not isinstance(total_list, list):
+            total_list = []
+
+        checked_workflows = []
+        stuck_workflows = []
+
+        for schedule in total_list:
+            wf_code = str(
+                schedule.get("processDefinitionCode")
+                or schedule.get("workflowDefinitionCode")
+                or ""
+            ).strip()
+            wf_name = str(
+                schedule.get("processDefinitionName")
+                or schedule.get("workflowDefinitionName")
+                or schedule.get("workflowName", "")
+            ).strip()
+            schedule_id = schedule.get("id")
+            schedule_status = schedule.get("releaseState") or schedule.get("scheduleReleaseState") or ""
+
+            if not wf_code:
+                continue
+
+            if filter_workflow_codes and wf_code not in filter_workflow_codes:
+                continue
+
+            ok, instances_result = self.request(
+                "GET",
+                f"/projects/{project_code}/workflow-instances",
+                query={
+                    "pageNo": 1,
+                    "pageSize": page_size,
+                    "processDefinitionCode": wf_code,
+                },
+            )
+            if not ok:
+                continue
+
+            instance_list = instances_result.get("data", {}).get("totalList", [])
+            if not isinstance(instance_list, list):
+                instance_list = []
+
+            if not instance_list:
+                checked_workflows.append({
+                    "workflow_code": wf_code,
+                    "workflow_name": wf_name or "-",
+                    "schedule_id": schedule_id,
+                    "schedule_status": schedule_status,
+                    "total_instances_checked": 0,
+                    "consecutive_failures": 0,
+                })
+                continue
+
+            def _instance_sort_key(inst):
+                return str(inst.get("endTime") or inst.get("startTime") or "")
+
+            instance_list.sort(key=_instance_sort_key, reverse=True)
+
+            consecutive_failures = 0
+            total_checked = 0
+            failure_details = []
+
+            for inst in instance_list:
+                total_checked += 1
+                state_desc = str(inst.get("stateDesc") or "").upper()
+                state_code = str(inst.get("state") or "")
+                is_failure = state_desc == "FAILURE" or state_code == "6"
+
+                if is_failure:
+                    consecutive_failures += 1
+                    failure_details.append({
+                        "instance_id": inst.get("id"),
+                        "schedule_time": inst.get("scheduleTime"),
+                        "start_time": inst.get("startTime"),
+                        "end_time": inst.get("endTime"),
+                        "state": state_desc or state_code,
+                    })
+                else:
+                    break
+
+            checked_workflows.append({
+                "workflow_code": wf_code,
+                "workflow_name": wf_name or "-",
+                "schedule_id": schedule_id,
+                "schedule_status": schedule_status,
+                "total_instances_checked": total_checked,
+                "consecutive_failures": consecutive_failures,
+            })
+
+            if consecutive_failures >= consecutive_threshold:
+                stuck_workflows.append({
+                    "workflow_code": wf_code,
+                    "workflow_name": wf_name or "-",
+                    "schedule_id": schedule_id,
+                    "schedule_status": schedule_status,
+                    "consecutive_failures": consecutive_failures,
+                    "total_checked": total_checked,
+                    "recent_failures": failure_details,
+                })
+
+        return True, {
+            "project_code": project_code,
+            "checked_workflows": checked_workflows,
+            "stuck_workflows": stuck_workflows,
+            "stuck_count": len(stuck_workflows),
+            "consecutive_threshold": consecutive_threshold,
+            "total_checked": len(checked_workflows),
+        }
+
     def list_task_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
         process_instance_id = (

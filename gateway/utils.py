@@ -25,6 +25,7 @@ SUPPORTED_ACTIONS = {
     "offline_workflow",
     "trigger_workflow",
     "list_instances",
+    "check_failed_instances",
     "get_instance",
     "list_task_instances",
     "get_task_log",

@@ -47,6 +47,39 @@
 - `get_datasource`
 - `extract_task_runtime_config`
 
+
+## 新增：定时任务失败监控
+
+### check_failed_instances
+
+检查指定项目中有哪些定时任务出现了连续失败，即卡住的失败场景（失败一次后后续调度也一直失败）。
+
+推荐 payload：
+
+
+
+参数说明：
+
+- : 可选，默认使用国家配置中的 project_code
+- : 可选数组，指定要检查的工作流 code；不传则检查项目下所有有定时的工作流
+- : 可选，默认 3，连续失败多少次判定为卡住
+- : 可选，默认 20，每个工作流拉取最近的实例数量
+
+返回说明：
+
+
+
+每个 stuck_workflow 包含：
+
+- : 工作流 code
+- : 工作流名称
+- : 定时配置 ID
+- : 定时状态（ONLINE/OFFLINE）
+- : 连续失败次数
+- : 检查的实例总数
+- : 最近失败的实例详情（含 instance_id、schedule_time、end_time、state）
+
+
 ## 已知问题
 
 - `extract_task_runtime_config` 在任务定义刚被 `update_sql_task` / `update_shell_task` 更新后的短时间内，
