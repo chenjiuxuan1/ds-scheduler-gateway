@@ -728,6 +728,8 @@ class DolphinSchedulerClient:
                 "checked_workflows": [],
                 "stuck_workflows": [],
                 "stuck_count": 0,
+                "stale_workflows": [],
+                "stale_count": 0,
                 "consecutive_threshold": consecutive_threshold,
                 "total_checked": 0,
             }
@@ -835,11 +837,32 @@ class DolphinSchedulerClient:
                     "recent_failures": failure_details,
                 })
 
+        # Detect stale schedules: OFFLINE or ONLINE with no recent instances
+        stale_workflows = []
+        for wf_code, schedule_info in schedule_map.items():
+            wf_instances = instances_by_workflow.get(wf_code, [])
+            if schedule_info["schedule_status"] == "OFFLINE":
+                stale_workflows.append({
+                    **schedule_info,
+                    "stale_reason": "schedule_offline",
+                    "stale_message": "定时任务已下线，长时间未运行",
+                    "total_instances_checked": len(wf_instances),
+                })
+            elif schedule_info["schedule_status"] == "ONLINE" and len(wf_instances) == 0:
+                stale_workflows.append({
+                    **schedule_info,
+                    "stale_reason": "no_recent_runs",
+                    "stale_message": "定时任务在线但近期无运行记录",
+                    "total_instances_checked": 0,
+                })
+
         return True, {
             "project_code": project_code,
             "checked_workflows": checked_workflows,
             "stuck_workflows": stuck_workflows,
             "stuck_count": len(stuck_workflows),
+            "stale_workflows": stale_workflows,
+            "stale_count": len(stale_workflows),
             "consecutive_threshold": consecutive_threshold,
             "total_checked": len(checked_workflows),
         }
