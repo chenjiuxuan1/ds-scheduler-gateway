@@ -74,5 +74,8 @@ def resolve_country_config(request: GatewayRequest, country_config: CountryConfi
 
 
 def route_request(request: GatewayRequest, country_config: CountryConfig):
+    if request.action == "search_country_git_sql":
+        from handlers.git_handlers import search_country_git_sql
+        return search_country_git_sql(request.country, request.payload)
     client = DolphinSchedulerClient(resolve_country_config(request, country_config), request.ds_token)
     return dispatch_action(client, request.action, request.payload)
