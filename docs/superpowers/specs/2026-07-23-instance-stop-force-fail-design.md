@@ -132,17 +132,20 @@
 
 `ds-skill-n8n` 需要同步：
 
-1. 在 `n8n/request_normalizer.js` 和工作流模板中放行两个动作。
-2. 对两个动作校验 `project_code` 与 `instance_id`。
-3. 在 `scripts/build_ds_webhook_payload.py` 中加入动作、参数校验和可执行示例。
-4. 更新 `SKILL.md`、`README.md`、`REFERENCE.md`、`EXAMPLES.md`、`n8n/README.md` 和中文快速上手文档。
-5. 文档明确说明：
+1. Router 修改必须以用户提供的 `/Users/jiangchuanchen/Downloads/ds-scheduler-router (2).json` 为唯一基线。该文件的 SHA-256 为 `16009d22a58df418684adfec09338ee804c6216c641e11cc1373ceb3baac4361`。
+2. 在 `n8n/request_normalizer.js` 和工作流模板中放行两个动作。
+3. 对两个动作校验 `project_code` 与 `instance_id`。
+4. 在 `scripts/build_ds_webhook_payload.py` 中加入动作、参数校验和可执行示例。
+5. 更新 `SKILL.md`、`README.md`、`REFERENCE.md`、`EXAMPLES.md`、`n8n/README.md` 和中文快速上手文档。
+6. 文档明确说明：
    - 两个动作会改变运行实例状态；
    - 必须由用户提供 `ds_token`；
    - 执行前必须获得用户对具体实例的明确确认；
    - `force_fail_instance` 可能按国家返回 `UNSUPPORTED`；
    - 不存在直接修改元数据库的降级路径。
-6. 基于用户提供的最新 `ds-scheduler-router (1).json` 生成或更新可导入 Router 产物，保留现有审计和六国分流结构。
+7. 直接在 `(2).json` 的“解析并标准化请求”节点中追加动作和字段校验；保留其现有 `resolve_project` 动作、24 个节点、19 组连接、六国代码拉取/执行分支和完整审计链路。
+8. 不重建节点，不更换节点 ID，不移动节点，不覆盖 `(2).json` 中比 `(1).json` 新增的 `resolve_project` 能力。
+9. 输出新的可导入 Router JSON，同时保留原始 `(2).json` 不变，便于逐项比较和回滚。
 
 ## 测试策略
 
@@ -164,6 +167,8 @@
 - 必填字段校验。
 - payload builder 生成正确请求。
 - workflow JSON 可解析并保留六国路由。
+- 修改后的 Router 仍包含 `(2).json` 的 `resolve_project`，节点数和连接关系不变。
+- 除“解析并标准化请求”节点中两个新动作及其校验外，Router 的已有节点参数、节点 ID、位置和连接均与 `(2).json` 一致。
 - 文档示例与实际 CLI 参数一致。
 
 ## 验收标准
@@ -174,3 +179,4 @@
 4. 代码中不存在修改 DS 元数据库状态的路径。
 5. n8n 可导入产物、Skill 契约、CLI 和全部文档保持一致。
 6. 自动化测试通过，且不需要连接生产环境。
+7. Router 产物可证明由指定 `(2).json` 增量修改而来，未丢失 `resolve_project` 或现有审计能力。
