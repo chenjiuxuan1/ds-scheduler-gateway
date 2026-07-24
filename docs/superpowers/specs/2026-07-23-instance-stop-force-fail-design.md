@@ -11,6 +11,14 @@
 
 六个国家 `cn / ine / mx / ph / pk / th` 均开放相同的请求契约。
 
+同时修复基线 Router 中已经放行、但代码仓库尚未全链路对齐的动作：
+
+- 在 `ds-scheduler-gateway` 中正式实现 `resolve_project`。
+- 在 `ds-skill-n8n` 命令构造器中补齐 `resolve_project`、`check_failed_instances`、`find_resource_usage` 和 `search_country_git_sql`。
+- 保留 `find_resource_usage` 与 `search_country_git_sql` 的 n8n 六国特殊执行链路，不错误迁移到 Gateway 主分发器。
+
+完成后 Router 共放行 41 个动作，每个动作必须在 Gateway 主链路或有明确实现的 n8n 特殊链路中可达，并在 Skill/CLI 文档中有一致契约。
+
 ## 安全边界
 
 1. 只调用 DolphinScheduler 官方 HTTP API。
@@ -45,6 +53,28 @@
 - `ds_token`
 - `payload.project_code`
 - `payload.instance_id`
+
+## 现有动作全链路规范化
+
+### `resolve_project`
+
+`resolve_project` 在 Gateway 中提供正式实现：
+
+1. 接受 `project_code` 或项目名称查询值。
+2. 显式传入 `project_code` 时，优先通过官方项目详情或项目列表验证。
+3. 按名称解析时，只接受唯一的精确名称匹配。
+4. 没有匹配返回 `PROJECT_NOT_FOUND`。
+5. 多个匹配返回 `AMBIGUOUS_PROJECT`，并返回候选项目的非敏感摘要。
+6. 成功响应统一返回项目名称和字符串形式的 `project_code`。
+
+Router 和 CLI 的字段名必须与 Gateway 一致，不允许依赖未记录的隐式字段。
+
+### n8n 特殊动作
+
+- `find_resource_usage` 继续由六国 SSH 节点中的只读资源引用反查脚本处理。
+- `search_country_git_sql` 继续由六国 SSH 节点中的只读 Git 搜索脚本处理。
+- 两个动作必须出现在 CLI、Skill 契约和文档中，并通过 Router 静态测试证明特殊分支仍存在。
+- `check_failed_instances` 走 Gateway 主链路，补齐 CLI 和文档入口。
 
 ## 能力矩阵
 
@@ -146,6 +176,21 @@
 7. 直接在 `(2).json` 的“解析并标准化请求”节点中追加动作和字段校验；保留其现有 `resolve_project` 动作、24 个节点、19 组连接、六国代码拉取/执行分支和完整审计链路。
 8. 不重建节点，不更换节点 ID，不移动节点，不覆盖 `(2).json` 中比 `(1).json` 新增的 `resolve_project` 能力。
 9. 输出新的可导入 Router JSON，同时保留原始 `(2).json` 不变，便于逐项比较和回滚。
+10. 对 Router 的 41 个动作执行静态能力对账：
+    - Gateway 主链路动作必须同时存在于 `SUPPORTED_ACTIONS` 和 handler。
+    - 特殊动作必须在对应的六国 n8n SSH 节点中存在实现。
+    - 所有动作必须被命令构造器、Skill 契约和参考文档收录。
+
+## 远端 Git 交付
+
+在全部本地测试通过后：
+
+1. `ds-scheduler-gateway` 的实现、测试、配置样例和文档提交到 `chenjiuxuan1/ds-scheduler-gateway`。
+2. `ds-skill-n8n` 的 Router 模板、命令构造器、Skill 契约、示例和文档提交到 `chenjiuxuan1/ds-skill-n8n`。
+3. 推送前拉取并确认远端分支没有新提交；若远端已前进则停止推送，先安全整合，不覆盖远端历史。
+4. 不使用强制推送。
+5. 可导入 Router JSON 同时保存为 `ds-skill-n8n` 仓库产物和当前任务 `outputs` 交付物。
+6. 交付结果列出两个远端提交 SHA、Router 文件 SHA-256 和测试结果。
 
 ## 测试策略
 
@@ -160,6 +205,8 @@
 - 只有显式能力配置能启用强制失败。
 - 操作后状态收敛与超时未收敛响应。
 - 六国旧配置无新增字段时保持兼容。
+- `resolve_project` 按 code、唯一精确名称、未找到和名称歧义的行为。
+- Gateway 主链路动作与 handler 映射完整一致。
 
 `ds-skill-n8n` 测试覆盖：
 
@@ -170,6 +217,8 @@
 - 修改后的 Router 仍包含 `(2).json` 的 `resolve_project`，节点数和连接关系不变。
 - 除“解析并标准化请求”节点中两个新动作及其校验外，Router 的已有节点参数、节点 ID、位置和连接均与 `(2).json` 一致。
 - 文档示例与实际 CLI 参数一致。
+- Router 41 个动作的全链路能力矩阵没有未实现或未记录项。
+- `resolve_project`、`check_failed_instances`、`find_resource_usage` 和 `search_country_git_sql` 均可由命令构造器生成合法请求。
 
 ## 验收标准
 
@@ -180,3 +229,5 @@
 5. n8n 可导入产物、Skill 契约、CLI 和全部文档保持一致。
 6. 自动化测试通过，且不需要连接生产环境。
 7. Router 产物可证明由指定 `(2).json` 增量修改而来，未丢失 `resolve_project` 或现有审计能力。
+8. Router 放行的 41 个动作全部能映射到 Gateway handler 或已验证存在的 n8n 特殊实现。
+9. 两个 GitHub 仓库包含经测试的最新代码和文档，且提交历史未被强制覆盖。
