@@ -19,6 +19,7 @@ class CountryConfig:
     action_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     project_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     workflow_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    instance_action_capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass

@@ -159,6 +159,61 @@ class DolphinSchedulerClient:
             query=query,
         )
 
+    def resolve_project(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        project_code = str(payload.get("project_code") or "").strip()
+        project_name = str(
+            payload.get("project_name")
+            or payload.get("search_val")
+            or ""
+        ).strip()
+        if not project_code and not project_name:
+            return False, {
+                "code": "INVALID_REQUEST",
+                "message": "resolve_project requires project_code or project_name",
+            }
+
+        ok, result = self.list_projects({
+            "page_no": 1,
+            "page_size": 200,
+            "search_val": project_name or project_code,
+        })
+        if not ok:
+            return False, result
+        items = self._extract_total_list(result)
+        if project_code:
+            matches = [
+                item for item in items
+                if str(item.get("code") or item.get("projectCode") or "").strip() == project_code
+            ]
+        else:
+            matches = [
+                item for item in items
+                if str(item.get("name") or item.get("projectName") or "").strip() == project_name
+            ]
+        if not matches:
+            return False, {
+                "code": "PROJECT_NOT_FOUND",
+                "message": f"project not found: {project_code or project_name}",
+            }
+        if len(matches) > 1:
+            return False, {
+                "code": "AMBIGUOUS_PROJECT",
+                "message": f"multiple projects matched exact name: {project_name}",
+                "candidates": [
+                    {
+                        "project_code": str(item.get("code") or item.get("projectCode") or ""),
+                        "project_name": str(item.get("name") or item.get("projectName") or ""),
+                    }
+                    for item in matches
+                ],
+            }
+        item = matches[0]
+        return True, {
+            "project_code": str(item.get("code") or item.get("projectCode") or ""),
+            "project_name": str(item.get("name") or item.get("projectName") or ""),
+            "project": item,
+        }
+
     def list_schedules(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
         query = {
@@ -1002,6 +1057,144 @@ class DolphinSchedulerClient:
             payload=payload,
             execute_type="START_FAILURE_TASK_PROCESS",
             action_name="retry_instance",
+        )
+
+    def _instance_action_capability(
+        self,
+        action_name: str,
+        default_execute_type: str = "",
+    ) -> Dict[str, Any]:
+        configured = self.config.instance_action_capabilities.get(action_name)
+        if isinstance(configured, dict):
+            return configured
+        if default_execute_type:
+            return {"supported": True, "execute_type": default_execute_type}
+        return {"supported": False}
+
+    @staticmethod
+    def _unwrap_instance(result: Any) -> Dict[str, Any]:
+        if not isinstance(result, dict):
+            return {}
+        data = result.get("data")
+        if isinstance(data, dict):
+            return data
+        return result
+
+    @staticmethod
+    def _instance_state(instance: Dict[str, Any]) -> str:
+        return str(
+            instance.get("state")
+            or instance.get("stateType")
+            or instance.get("workflowInstanceState")
+            or ""
+        ).strip().upper()
+
+    def _run_configured_instance_action(
+        self,
+        payload: Dict[str, Any],
+        action_name: str,
+        default_execute_type: str = "",
+    ) -> Tuple[bool, Any]:
+        capability = self._instance_action_capability(action_name, default_execute_type)
+        if not capability.get("supported"):
+            return False, {
+                "code": "UNSUPPORTED",
+                "message": (
+                    f"{action_name} is not supported by the official API "
+                    f"for country {self.config.country}"
+                ),
+            }
+        execute_type = str(capability.get("execute_type") or "").strip()
+        if not execute_type:
+            return False, {
+                "code": "UNSUPPORTED",
+                "message": f"{action_name} has no configured official execute_type",
+            }
+
+        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        instance_id = self._safe_int(payload.get("instance_id"))
+        if not project_code or instance_id <= 0:
+            return False, {
+                "code": "INVALID_REQUEST",
+                "message": f"{action_name} requires project_code and instance_id",
+            }
+
+        before_ok, before_result = self.get_instance({
+            "project_code": project_code,
+            "instance_id": instance_id,
+        })
+        if not before_ok or not self._is_ds_success(before_result):
+            return False, {
+                "code": "INSTANCE_NOT_FOUND",
+                "message": f"workflow instance not found: {instance_id}",
+                "result": before_result,
+            }
+        previous_state = self._instance_state(self._unwrap_instance(before_result))
+        stopped_states = {"STOP", "STOPPED", "READY_STOP"}
+        terminal_states = {
+            "SUCCESS", "FAILURE", "FAILED", "KILL", "KILLED",
+            "FORCED_SUCCESS", "SERIAL_WAIT",
+        }
+        if action_name == "stop_instance" and previous_state in stopped_states:
+            return True, {
+                "project_code": project_code,
+                "instance_id": instance_id,
+                "action": action_name,
+                "execute_type": execute_type,
+                "previous_state": previous_state,
+                "final_state": previous_state,
+                "accepted": True,
+                "converged": True,
+                "idempotent": True,
+            }
+        if previous_state in terminal_states:
+            return False, {
+                "code": "INVALID_INSTANCE_STATE",
+                "message": f"cannot {action_name} instance in state {previous_state}",
+            }
+
+        ok, result = self._execute_instance_action(payload, execute_type, action_name)
+        if not ok:
+            return False, {"code": "DS_API_ERROR", "message": result}
+
+        expected_states = stopped_states if action_name == "stop_instance" else {
+            "FAILURE", "FAILED",
+        }
+        final_state = previous_state
+        converged = False
+        poll_attempts = max(1, min(self._safe_int(payload.get("poll_attempts"), 3), 10))
+        for attempt in range(poll_attempts):
+            status_ok, status_result = self.get_instance({
+                "project_code": project_code,
+                "instance_id": instance_id,
+            })
+            if status_ok:
+                final_state = self._instance_state(self._unwrap_instance(status_result))
+                if final_state in expected_states:
+                    converged = True
+                    break
+            if attempt + 1 < poll_attempts:
+                time.sleep(0.2)
+        return True, {
+            "project_code": project_code,
+            "instance_id": instance_id,
+            "action": action_name,
+            "execute_type": execute_type,
+            "previous_state": previous_state,
+            "final_state": final_state,
+            "accepted": True,
+            "converged": converged,
+            "result": result,
+        }
+
+    def stop_instance(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        return self._run_configured_instance_action(
+            payload, "stop_instance", "STOP"
+        )
+
+    def force_fail_instance(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        return self._run_configured_instance_action(
+            payload, "force_fail_instance"
         )
 
     def list_datasources(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:

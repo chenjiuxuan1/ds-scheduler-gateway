@@ -12,6 +12,7 @@ from .models import CountryConfig, GatewayRequest
 SUPPORTED_ACTIONS = {
     "search_country_git_sql",
     "list_projects",
+    "resolve_project",
     "list_workflows",
     "create_workflow",
     "list_schedules",
@@ -31,6 +32,8 @@ SUPPORTED_ACTIONS = {
     "list_task_instances",
     "get_task_log",
     "retry_instance",
+    "stop_instance",
+    "force_fail_instance",
     "append_task",
     "append_sql_task",
     "append_shell_task",

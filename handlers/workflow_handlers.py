@@ -8,6 +8,7 @@ from clients.dolphinscheduler_client import DolphinSchedulerClient
 def dispatch_action(client: DolphinSchedulerClient, action: str, payload: Dict[str, Any]) -> Tuple[bool, Any]:
     handlers = {
         "list_projects": lambda: client.list_projects(payload),
+        "resolve_project": lambda: client.resolve_project(payload),
         "list_workflows": lambda: client.list_workflows(payload),
         "create_workflow": lambda: client.create_workflow(payload),
         "list_schedules": lambda: client.list_schedules(payload),
@@ -27,6 +28,8 @@ def dispatch_action(client: DolphinSchedulerClient, action: str, payload: Dict[s
         "list_task_instances": lambda: client.list_task_instances(payload),
         "get_task_log": lambda: client.get_task_log(payload),
         "retry_instance": lambda: client.retry_instance(payload),
+        "stop_instance": lambda: client.stop_instance(payload),
+        "force_fail_instance": lambda: client.force_fail_instance(payload),
         "append_task": lambda: client.append_task(payload),
         "append_sql_task": lambda: client.append_sql_task(payload),
         "append_shell_task": lambda: client.append_shell_task(payload),
