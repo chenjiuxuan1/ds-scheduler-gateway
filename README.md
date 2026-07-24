@@ -15,6 +15,7 @@
 ## 当前支持动作
 
 - `list_projects`
+- `resolve_project`
 - `list_workflows`
 - `create_workflow`
 - `list_schedules`
@@ -33,6 +34,9 @@
 - `list_task_instances`
 - `get_task_log`
 - `retry_instance`
+- `stop_instance`
+- `force_fail_instance`
+- `check_failed_instances`
 - `dump_workflow_graph`
 - `append_task`
 - `append_sql_task`
@@ -46,6 +50,21 @@
 - `list_datasources`
 - `get_datasource`
 - `extract_task_runtime_config`
+- `list_resources`
+- `view_resource_file`
+- `search_resource_sql`
+- `search_country_git_sql`
+
+## 实例控制安全约束
+
+- `stop_instance` 先读取实例状态，再通过 DolphinScheduler 官方
+  `executors/execute` 接口发送 `executeType=STOP`，并短轮询最终状态。
+- `force_fail_instance` 仅在国家配置中存在经过验证的官方 API
+  `execute_type` 时执行；默认返回 `UNSUPPORTED`。
+- 两个动作都要求 `project_code`、`instance_id` 和有效的 DS Token。
+- 网关绝不通过修改 DolphinScheduler 元数据库来停止或强制失败实例。
+- `resolve_project` 支持按 code 或唯一精确项目名解析；名称歧义会返回
+  `AMBIGUOUS_PROJECT`。
 
 
 ## 新增：定时任务失败监控

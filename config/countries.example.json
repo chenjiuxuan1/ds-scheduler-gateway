@@ -9,6 +9,10 @@
     "api_mode": "auto",
     "start_endpoint": "auto",
     "start_code_field": "auto",
+    "instance_action_capabilities": {
+      "stop_instance": {"supported": true, "execute_type": "STOP"},
+      "force_fail_instance": {"supported": false}
+    },
     "action_overrides": {
       "trigger_workflow": {
         "tenant_code": "default",
@@ -26,6 +30,10 @@
     "api_mode": "auto",
     "start_endpoint": "auto",
     "start_code_field": "auto",
+    "instance_action_capabilities": {
+      "stop_instance": {"supported": true, "execute_type": "STOP"},
+      "force_fail_instance": {"supported": false}
+    },
     "workflow_overrides": {
       "20343242216898": {
         "tenant_code": "default",
@@ -59,6 +67,10 @@
     "api_mode": "auto",
     "start_endpoint": "auto",
     "start_code_field": "auto",
+    "instance_action_capabilities": {
+      "stop_instance": {"supported": true, "execute_type": "STOP"},
+      "force_fail_instance": {"supported": false}
+    },
     "workflow_overrides": {
       "13930032652256": {
         "tenant_code": "dolphinscheduler",
@@ -84,6 +96,10 @@
     "api_mode": "auto",
     "start_endpoint": "auto",
     "start_code_field": "auto",
+    "instance_action_capabilities": {
+      "stop_instance": {"supported": true, "execute_type": "STOP"},
+      "force_fail_instance": {"supported": false}
+    },
     "workflow_overrides": {
       "15845044782816": {
         "tenant_code": "dolphinscheduler",
@@ -109,6 +125,10 @@
     "api_mode": "auto",
     "start_endpoint": "auto",
     "start_code_field": "auto",
+    "instance_action_capabilities": {
+      "stop_instance": {"supported": true, "execute_type": "STOP"},
+      "force_fail_instance": {"supported": false}
+    },
     "workflow_overrides": {
       "20091910711168": {
         "tenant_code": "default",
@@ -126,6 +146,10 @@
     "api_mode": "auto",
     "start_endpoint": "start-workflow-instance",
     "start_code_field": "workflowDefinitionCode",
+    "instance_action_capabilities": {
+      "stop_instance": {"supported": true, "execute_type": "STOP"},
+      "force_fail_instance": {"supported": false}
+    },
     "workflow_overrides": {
       "169585683956416": {
         "tenant_code": "dolphinscheduler",
