@@ -738,6 +738,7 @@ class DolphinSchedulerClient:
         project_code = str(payload.get("project_code") or self.config.project_code).strip()
         consecutive_threshold = int(payload.get("consecutive_failures", 3))
         page_size = int(payload.get("page_size", 20))
+        include_offline_failures = bool(payload.get("include_offline_failures", False))
         filter_workflow_codes = payload.get("workflow_codes", [])
         if isinstance(filter_workflow_codes, str):
             filter_workflow_codes = [filter_workflow_codes]
@@ -920,7 +921,10 @@ class DolphinSchedulerClient:
             # Do not wait for three failures before alerting. A retry uses
             # START_FAILURE_TASK_PROCESS, so it is part of the failed scheduled
             # execution chain. A later successful instance clears the alert.
-            if schedule_info["schedule_status"] == "ONLINE":
+            should_report_failures = schedule_info["schedule_status"] == "ONLINE" or (
+                include_offline_failures and schedule_info["schedule_status"] == "OFFLINE"
+            )
+            if should_report_failures:
                 for index, inst in enumerate(instance_list):
                     if not (_is_failure(inst) and _is_scheduled_failure_chain(inst) and _instance_day(inst) == today):
                         continue
@@ -929,8 +933,12 @@ class DolphinSchedulerClient:
                     command_type = str(inst.get("commandType") or inst.get("command_type") or "").upper()
                     detail = str(inst.get("errorMessage") or inst.get("message") or "").strip()
                     failure_message = "当天定时任务执行失败"
+                    if schedule_info["schedule_status"] == "OFFLINE":
+                        failure_message = "调度已离线，最近一次执行失败"
                     if command_type == "START_FAILURE_TASK_PROCESS":
                         failure_message = "当天定时任务失败后重跑仍失败"
+                        if schedule_info["schedule_status"] == "OFFLINE":
+                            failure_message = "调度已离线，失败重跑仍失败"
                     if detail:
                         failure_message = f"{failure_message}：{detail}"
                     failed_workflows.append({
