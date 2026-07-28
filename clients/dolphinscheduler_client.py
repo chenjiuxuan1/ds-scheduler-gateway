@@ -738,7 +738,6 @@ class DolphinSchedulerClient:
         project_code = str(payload.get("project_code") or self.config.project_code).strip()
         consecutive_threshold = int(payload.get("consecutive_failures", 3))
         page_size = int(payload.get("page_size", 20))
-        include_offline_failures = bool(payload.get("include_offline_failures", False))
         filter_workflow_codes = payload.get("workflow_codes", [])
         if isinstance(filter_workflow_codes, str):
             filter_workflow_codes = [filter_workflow_codes]
@@ -856,6 +855,35 @@ class DolphinSchedulerClient:
             command_type = str(inst.get("commandType") or inst.get("command_type") or "").upper()
             return not command_type or command_type in {"SCHEDULER", "START_FAILURE_TASK_PROCESS"}
 
+        def _verified_schedule_status(schedule_info: Dict[str, Any]) -> str:
+            """Confirm a conflicting offline list result from workflow detail."""
+            listed_status = str(schedule_info.get("schedule_status") or "").upper()
+            if listed_status != "OFFLINE":
+                return listed_status
+            try:
+                ok, workflow_result = self.get_workflow({
+                    "project_code": project_code,
+                    "workflow_code": schedule_info.get("workflow_code"),
+                })
+                if not ok:
+                    return listed_status
+                detail = self._unwrap_workflow_detail(workflow_result)
+                workflow_meta = self._get_workflow_meta(detail)
+                workflow_schedule = self._get_workflow_schedule(detail)
+                candidates = [
+                    workflow_schedule.get("releaseState") if isinstance(workflow_schedule, dict) else "",
+                    workflow_schedule.get("scheduleReleaseState") if isinstance(workflow_schedule, dict) else "",
+                    detail.get("scheduleReleaseState"),
+                    workflow_meta.get("scheduleReleaseState"),
+                ]
+                for candidate in candidates:
+                    normalized = str(candidate or "").strip().upper()
+                    if normalized in {"ONLINE", "OFFLINE"}:
+                        return normalized
+            except Exception:
+                pass
+            return listed_status
+
         for wf_code, schedule_info in schedule_map.items():
             instance_list = instances_by_workflow.get(wf_code, [])
             # Sort by endTime descending (most recent first)
@@ -921,40 +949,36 @@ class DolphinSchedulerClient:
             # Do not wait for three failures before alerting. A retry uses
             # START_FAILURE_TASK_PROCESS, so it is part of the failed scheduled
             # execution chain. A later successful instance clears the alert.
-            should_report_failures = schedule_info["schedule_status"] == "ONLINE" or (
-                include_offline_failures and schedule_info["schedule_status"] == "OFFLINE"
-            )
-            if should_report_failures:
-                for index, inst in enumerate(instance_list):
-                    if not (_is_failure(inst) and _is_scheduled_failure_chain(inst) and _instance_day(inst) == today):
-                        continue
-                    if any(_is_success(later) for later in instance_list[:index]):
-                        continue
-                    command_type = str(inst.get("commandType") or inst.get("command_type") or "").upper()
-                    detail = str(inst.get("errorMessage") or inst.get("message") or "").strip()
-                    failure_message = "当天定时任务执行失败"
-                    if schedule_info["schedule_status"] == "OFFLINE":
-                        failure_message = "调度已离线，最近一次执行失败"
-                    if command_type == "START_FAILURE_TASK_PROCESS":
-                        failure_message = "当天定时任务失败后重跑仍失败"
-                        if schedule_info["schedule_status"] == "OFFLINE":
-                            failure_message = "调度已离线，失败重跑仍失败"
-                    if detail:
-                        failure_message = f"{failure_message}：{detail}"
-                    failed_workflows.append({
-                        **schedule_info,
-                        "failure_reason": "scheduled_instance_failed",
-                        "failure_message": failure_message,
-                        "has_later_success": False,
-                        "instance_id": inst.get("id") or inst.get("workflowInstanceId"),
-                        "instance_state": _instance_state(inst),
-                        "command_type": command_type,
-                        "instance_name": str(inst.get("name") or inst.get("workflowInstanceName") or schedule_info["workflow_name"]),
-                        "start_time": inst.get("startTime"),
-                        "end_time": inst.get("endTime"),
-                        "schedule_time": inst.get("scheduleTime"),
-                    })
-                    break
+            for index, inst in enumerate(instance_list):
+                if not (_is_failure(inst) and _is_scheduled_failure_chain(inst) and _instance_day(inst) == today):
+                    continue
+                if any(_is_success(later) for later in instance_list[:index]):
+                    continue
+                reported_schedule_status = _verified_schedule_status(schedule_info)
+                if reported_schedule_status != "ONLINE":
+                    continue
+                command_type = str(inst.get("commandType") or inst.get("command_type") or "").upper()
+                detail = str(inst.get("errorMessage") or inst.get("message") or "").strip()
+                failure_message = "当天定时任务执行失败"
+                if command_type == "START_FAILURE_TASK_PROCESS":
+                    failure_message = "当天定时任务失败后重跑仍失败"
+                if detail:
+                    failure_message = f"{failure_message}：{detail}"
+                failed_workflows.append({
+                    **schedule_info,
+                    "schedule_status": reported_schedule_status,
+                    "failure_reason": "scheduled_instance_failed",
+                    "failure_message": failure_message,
+                    "has_later_success": False,
+                    "instance_id": inst.get("id") or inst.get("workflowInstanceId"),
+                    "instance_state": _instance_state(inst),
+                    "command_type": command_type,
+                    "instance_name": str(inst.get("name") or inst.get("workflowInstanceName") or schedule_info["workflow_name"]),
+                    "start_time": inst.get("startTime"),
+                    "end_time": inst.get("endTime"),
+                    "schedule_time": inst.get("scheduleTime"),
+                })
+                break
 
         # Detect stale schedules: OFFLINE or ONLINE with no recent instances
         stale_workflows = []
