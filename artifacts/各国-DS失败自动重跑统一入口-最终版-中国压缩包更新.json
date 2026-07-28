@@ -480,7 +480,7 @@
     {
       "parameters": {
         "authentication": "privateKey",
-        "command": "ssh root@10.20.10.12 \"cd /root/Global-Intelligent-Alarm-Repair-Assistant || exit 1; git fetch --prune origin master || exit 1; git checkout master >/dev/null 2>&1 || git checkout -b master origin/master || exit 1; git reset --hard origin/master || exit 1; git rev-parse --short HEAD\""
+        "command": "ssh root@10.20.10.12 \"cd /root/Global-Intelligent-Alarm-Repair-Assistant || exit 1; git fetch --prune origin '+refs/heads/master:refs/remotes/origin/master' || exit 1; git checkout master >/dev/null 2>&1 || git checkout -b master origin/master || exit 1; git reset --hard origin/master || exit 1; git rev-parse --short HEAD\""
       },
       "id": "16fab8da-453c-441f-8ffb-d31a65479386",
       "name": "菲律宾更新自动重跑代码",
@@ -494,7 +494,7 @@
     {
       "parameters": {
         "authentication": "privateKey",
-        "command": "=ssh -p 36000 root@192.168.21.236 \"cd /root/Global-Intelligent-Alarm-Repair-Assistant || exit 1; git fetch --prune origin master || exit 1; git checkout master >/dev/null 2>&1 || git checkout -b master origin/master || exit 1; git reset --hard origin/master || exit 1; git rev-parse --short HEAD\""
+        "command": "=ssh -p 36000 root@192.168.21.236 \"cd /root/Global-Intelligent-Alarm-Repair-Assistant || exit 1; git fetch --prune origin '+refs/heads/master:refs/remotes/origin/master' || exit 1; git checkout master >/dev/null 2>&1 || git checkout -b master origin/master || exit 1; git reset --hard origin/master || exit 1; git rev-parse --short HEAD\""
       },
       "id": "4ac3b825-32bc-4c21-8a62-aebed707328f",
       "name": "印尼更新自动重跑代码",
@@ -508,7 +508,7 @@
     {
       "parameters": {
         "authentication": "privateKey",
-        "command": "=ssh -p 36000 root@172.20.220.165 \"cd /root/Global-Intelligent-Alarm-Repair-Assistant || exit 1; git fetch --prune origin master || exit 1; git checkout master >/dev/null 2>&1 || git checkout -b master origin/master || exit 1; git reset --hard origin/master || exit 1; git rev-parse --short HEAD\""
+        "command": "=ssh -p 36000 root@172.20.220.165 \"cd /root/Global-Intelligent-Alarm-Repair-Assistant || exit 1; git fetch --prune origin '+refs/heads/master:refs/remotes/origin/master' || exit 1; git checkout master >/dev/null 2>&1 || git checkout -b master origin/master || exit 1; git reset --hard origin/master || exit 1; git rev-parse --short HEAD\""
       },
       "id": "5672ac0d-afe6-4aa9-b594-f98aed45d203",
       "name": "墨西哥更新自动重跑代码",
@@ -522,7 +522,7 @@
     {
       "parameters": {
         "authentication": "privateKey",
-        "command": "=ssh -p 36000 root@192.168.20.236 \"cd /root/Global-Intelligent-Alarm-Repair-Assistant || exit 1; git fetch --prune origin master || exit 1; git checkout master >/dev/null 2>&1 || git checkout -b master origin/master || exit 1; git reset --hard origin/master || exit 1; git rev-parse --short HEAD\""
+        "command": "=ssh -p 36000 root@192.168.20.236 \"cd /root/Global-Intelligent-Alarm-Repair-Assistant || exit 1; git fetch --prune origin '+refs/heads/master:refs/remotes/origin/master' || exit 1; git checkout master >/dev/null 2>&1 || git checkout -b master origin/master || exit 1; git reset --hard origin/master || exit 1; git rev-parse --short HEAD\""
       },
       "id": "6e8f620c-047a-4678-87ad-54614ae3cc84",
       "name": "泰国更新自动重跑代码",
@@ -536,7 +536,7 @@
     {
       "parameters": {
         "authentication": "privateKey",
-        "command": "=ssh root@10.20.84.176 \"cd /root/Global-Intelligent-Alarm-Repair-Assistant || exit 1; git fetch --prune origin master || exit 1; git checkout master >/dev/null 2>&1 || git checkout -b master origin/master || exit 1; git reset --hard origin/master || exit 1; git rev-parse --short HEAD\""
+        "command": "=ssh root@10.20.84.176 \"cd /root/Global-Intelligent-Alarm-Repair-Assistant || exit 1; git fetch --prune origin '+refs/heads/master:refs/remotes/origin/master' || exit 1; git checkout master >/dev/null 2>&1 || git checkout -b master origin/master || exit 1; git reset --hard origin/master || exit 1; git rev-parse --short HEAD\""
       },
       "id": "3b3beca4-170c-4ac0-a106-974db5fa003d",
       "name": "巴基斯坦更新自动重跑代码",
