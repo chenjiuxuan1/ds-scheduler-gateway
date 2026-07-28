@@ -785,6 +785,8 @@ class DolphinSchedulerClient:
                 "stuck_count": 0,
                 "stale_workflows": [],
                 "stale_count": 0,
+                "failed_workflows": [],
+                "failed_count": 0,
                 "consecutive_threshold": consecutive_threshold,
                 "total_checked": 0,
             }
@@ -826,9 +828,32 @@ class DolphinSchedulerClient:
                 instances_by_workflow[wf_code] = []
             instances_by_workflow[wf_code].append(inst)
 
-        # Step 4: For each workflow, sort by endTime desc and check consecutive failures
+        # Step 4: For each workflow, sort by endTime desc and check consecutive failures.
+        # The latest unrecovered failure is also returned to the duty platform.
         checked_workflows = []
         stuck_workflows = []
+        failed_workflows = []
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        def _instance_state(inst: Dict[str, Any]) -> str:
+            return str(inst.get("stateDesc") or inst.get("state") or "").upper()
+
+        def _is_failure(inst: Dict[str, Any]) -> bool:
+            return _instance_state(inst) in {"FAILURE", "KILL", "STOP", "STOPPED", "6", "9"}
+
+        def _is_success(inst: Dict[str, Any]) -> bool:
+            return _instance_state(inst) in {"SUCCESS", "7"}
+
+        def _instance_day(inst: Dict[str, Any]) -> str:
+            raw = str(inst.get("scheduleTime") or inst.get("startTime") or inst.get("endTime") or "")
+            matched = re.search(r"\d{4}-\d{2}-\d{2}", raw)
+            return matched.group(0) if matched else ""
+
+        def _is_scheduled_failure_chain(inst: Dict[str, Any]) -> bool:
+            # Older DS APIs omit commandType. The workflow is already limited to
+            # an ONLINE schedule, so retain it instead of silently dropping it.
+            command_type = str(inst.get("commandType") or inst.get("command_type") or "").upper()
+            return not command_type or command_type in {"SCHEDULER", "START_FAILURE_TASK_PROCESS"}
 
         for wf_code, schedule_info in schedule_map.items():
             instance_list = instances_by_workflow.get(wf_code, [])
@@ -864,7 +889,7 @@ class DolphinSchedulerClient:
                 total_checked += 1
                 state_desc = str(inst.get("stateDesc") or "").upper()
                 state_code = str(inst.get("state") or "")
-                is_failure = state_desc == "FAILURE" or state_code == "6"
+                is_failure = _is_failure(inst)
 
                 if is_failure:
                     consecutive_failures += 1
@@ -892,6 +917,37 @@ class DolphinSchedulerClient:
                     "recent_failures": failure_details,
                 })
 
+            # Do not wait for three failures before alerting. A retry uses
+            # START_FAILURE_TASK_PROCESS, so it is part of the failed scheduled
+            # execution chain. A later successful instance clears the alert.
+            if schedule_info["schedule_status"] == "ONLINE":
+                for index, inst in enumerate(instance_list):
+                    if not (_is_failure(inst) and _is_scheduled_failure_chain(inst) and _instance_day(inst) == today):
+                        continue
+                    if any(_is_success(later) for later in instance_list[:index]):
+                        continue
+                    command_type = str(inst.get("commandType") or inst.get("command_type") or "").upper()
+                    detail = str(inst.get("errorMessage") or inst.get("message") or "").strip()
+                    failure_message = "当天定时任务执行失败"
+                    if command_type == "START_FAILURE_TASK_PROCESS":
+                        failure_message = "当天定时任务失败后重跑仍失败"
+                    if detail:
+                        failure_message = f"{failure_message}：{detail}"
+                    failed_workflows.append({
+                        **schedule_info,
+                        "failure_reason": "scheduled_instance_failed",
+                        "failure_message": failure_message,
+                        "has_later_success": False,
+                        "instance_id": inst.get("id") or inst.get("workflowInstanceId"),
+                        "instance_state": _instance_state(inst),
+                        "command_type": command_type,
+                        "instance_name": str(inst.get("name") or inst.get("workflowInstanceName") or schedule_info["workflow_name"]),
+                        "start_time": inst.get("startTime"),
+                        "end_time": inst.get("endTime"),
+                        "schedule_time": inst.get("scheduleTime"),
+                    })
+                    break
+
         # Detect stale schedules: OFFLINE or ONLINE with no recent instances
         stale_workflows = []
         for wf_code, schedule_info in schedule_map.items():
@@ -918,6 +974,8 @@ class DolphinSchedulerClient:
             "stuck_count": len(stuck_workflows),
             "stale_workflows": stale_workflows,
             "stale_count": len(stale_workflows),
+            "failed_workflows": failed_workflows,
+            "failed_count": len(failed_workflows),
             "consecutive_threshold": consecutive_threshold,
             "total_checked": len(checked_workflows),
         }

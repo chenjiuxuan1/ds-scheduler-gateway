@@ -71,7 +71,7 @@
 
 ### check_failed_instances
 
-检查指定项目中有哪些定时任务出现了连续失败，即卡住的失败场景（失败一次后后续调度也一直失败）。
+检查指定项目中有哪些定时任务出现了连续失败，以及当天尚未恢复的失败实例。
 
 推荐 payload：
 
@@ -97,6 +97,11 @@
 - : 连续失败次数
 - : 检查的实例总数
 - : 最近失败的实例详情（含 instance_id、schedule_time、end_time、state）
+
+当请求包含 `include_failed_workflows: true` 时，响应还会返回
+`failed_workflows`。每项均为在线定时工作流当天的最新未恢复失败；若失败后重跑
+（`START_FAILURE_TASK_PROCESS`）仍失败，也会作为同一条失败链路返回。普通手动启动
+的失败不会进入该列表。若失败之后已有成功实例，则不会告警。
 
 
 ## 已知问题
