@@ -90,6 +90,23 @@ class InstanceActionTests(unittest.TestCase):
         self.assertEqual("FORCE_FAILURE", client.calls[1]["form"]["executeType"])
         self.assertTrue(result["converged"])
 
+    def test_failed_workflow_uses_task_log_permission_root_cause(self):
+        client = FakeClient(config(), [
+            (True, {"code": 0, "data": {"totalList": [{
+                "id": 31,
+                "name": "写入策略表",
+                "taskCode": 99,
+                "state": "FAILURE",
+            }]}}),
+            (True, {"code": 0, "data": {"log": "INFO - run etl fail\nAccess denied; you need (at least one of) the SELECT privilege(s) on TABLE dm_strategy_ps_mex017_c1c2_s1_month_start for this operation."}}),
+        ])
+        result = client._find_failed_task_reason("1", {"id": 22})
+        self.assertEqual("写入策略表", result["task_name"])
+        self.assertEqual(
+            "StarRocks 权限不足：缺少表 dm_strategy_ps_mex017_c1c2_s1_month_start 的 SELECT 权限",
+            result["reason"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

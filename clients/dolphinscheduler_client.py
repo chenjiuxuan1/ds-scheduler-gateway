@@ -959,10 +959,17 @@ class DolphinSchedulerClient:
                     continue
                 command_type = str(inst.get("commandType") or inst.get("command_type") or "").upper()
                 detail = str(inst.get("errorMessage") or inst.get("message") or "").strip()
+                task_failure = self._find_failed_task_reason(project_code, inst)
                 failure_message = "当天定时任务执行失败"
                 if command_type == "START_FAILURE_TASK_PROCESS":
                     failure_message = "当天定时任务失败后重跑仍失败"
-                if detail:
+                # The workflow instance only contains a generic summary on many
+                # DS deployments (for example "run etl fail"). The failed task
+                # log is the authoritative source for SQL and permission errors.
+                if task_failure.get("reason"):
+                    task_label = task_failure.get("task_name") or task_failure.get("task_instance_id") or "失败任务"
+                    failure_message = f"{failure_message}：任务 {task_label}：{task_failure['reason']}"
+                elif detail:
                     failure_message = f"{failure_message}：{detail}"
                 failed_workflows.append({
                     **schedule_info,
@@ -977,6 +984,11 @@ class DolphinSchedulerClient:
                     "start_time": inst.get("startTime"),
                     "end_time": inst.get("endTime"),
                     "schedule_time": inst.get("scheduleTime"),
+                    "task_name": task_failure.get("task_name", ""),
+                    "task_code": task_failure.get("task_code", ""),
+                    "task_instance_id": task_failure.get("task_instance_id", ""),
+                    "task_state": task_failure.get("task_state", ""),
+                    "failure_log_excerpt": task_failure.get("log_excerpt", ""),
                 })
                 break
 
@@ -1011,6 +1023,77 @@ class DolphinSchedulerClient:
             "consecutive_threshold": consecutive_threshold,
             "total_checked": len(checked_workflows),
         }
+
+    def _find_failed_task_reason(self, project_code: str, instance: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a compact root cause from the failed task log when available.
+
+        Failure log lookup is best effort: a permissions problem in the log API
+        must not hide the workflow failure itself.
+        """
+        instance_id = self._safe_int(instance.get("id") or instance.get("workflowInstanceId"))
+        if instance_id <= 0:
+            return {}
+        try:
+            ok, result = self.list_task_instances({
+                "project_code": project_code,
+                "instance_id": instance_id,
+                "page_no": 1,
+                "page_size": 100,
+            })
+            if not ok:
+                return {}
+            candidates = self._extract_total_list(result)
+            failed = [item for item in candidates if self._is_failed_task_instance(item)]
+            for task in failed:
+                task_instance_id = self._safe_int(task.get("id") or task.get("taskInstanceId"))
+                if task_instance_id <= 0:
+                    continue
+                log_ok, log_result = self.get_task_log({
+                    "project_code": project_code,
+                    "task_instance_id": task_instance_id,
+                    "instance_id": instance_id,
+                })
+                log_text = str(log_result.get("log") or "") if log_ok and isinstance(log_result, dict) else ""
+                reason = self._summarize_task_failure(log_text)
+                if not reason:
+                    continue
+                return {
+                    "reason": reason,
+                    "log_excerpt": log_text[-2000:],
+                    "task_name": str(task.get("name") or task.get("taskName") or "").strip(),
+                    "task_code": self._safe_int(task.get("taskCode")),
+                    "task_instance_id": task_instance_id,
+                    "task_state": str(task.get("stateDesc") or task.get("state") or "").strip(),
+                }
+        except Exception:
+            return {}
+        return {}
+
+    def _is_failed_task_instance(self, task: Dict[str, Any]) -> bool:
+        state = str(task.get("stateDesc") or task.get("state") or "").upper()
+        return state in {"FAILURE", "KILL", "STOP", "STOPPED", "6", "9"}
+
+    def _summarize_task_failure(self, log_text: str) -> str:
+        """Extract an actionable error instead of a generic ETL wrapper line."""
+        text = str(log_text or "")
+        if not text:
+            return ""
+        access_denied = re.search(
+            r"Access denied;.*?SELECT privilege\(s\).*?TABLE\s+([`\w.]+)",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if access_denied:
+            return f"StarRocks 权限不足：缺少表 {access_denied.group(1).strip('`')} 的 SELECT 权限"
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        priorities = ("access denied", "permission denied", "exception", "error", "failed", "失败")
+        for keyword in priorities:
+            for line in reversed(lines):
+                if keyword.lower() in line.lower() and "run etl fail" not in line.lower():
+                    line = re.sub(r"^.*?\b(?:ERROR|Exception)\b\s*[-:]?\s*", "", line, flags=re.IGNORECASE)
+                    return line[:500]
+        return ""
     def list_task_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = payload.get("project_code") or self.config.project_code
         process_instance_id = (
