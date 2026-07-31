@@ -1553,6 +1553,7 @@ class DolphinSchedulerClient:
 
             matched_files.append(
                 {
+                    "resource_id": str(item.get("resource_id") or "").strip(),
                     "name": str(item.get("name") or "").strip(),
                     "full_name": full_name,
                     "resource_type": resource_type,
@@ -4274,6 +4275,16 @@ class DolphinSchedulerClient:
             is_directory = self._resource_node_is_directory(node)
             flattened.append(
                 {
+                    # DS task_params.resourceList may retain only this ID,
+                    # without a filename or full path. Preserve it as
+                    # additive metadata for read-only lineage lookups.
+                    "resource_id": str(
+                        node.get("id")
+                        or node.get("resourceId")
+                        or node.get("resource_id")
+                        or node.get("code")
+                        or ""
+                    ).strip(),
                     "name": name,
                     "full_name": full_name,
                     "current_dir": current_dir,
