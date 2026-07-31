@@ -62,6 +62,20 @@ def decode_payload_b64(payload_b64: str) -> Dict[str, Any]:
         raise ValueError("payload must decode to a JSON object")
     return data
 
+def decode_payload_file(payload_file: str) -> Dict[str, Any]:
+    """Read and decode a JSON payload from a file path.
+
+    This avoids passing large payloads as command-line arguments.
+    """
+    if not payload_file:
+        return {}
+    raw = Path(payload_file).read_text(encoding="utf-8")
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("payload file must contain a JSON object")
+    return data
+
+
 
 def load_countries_config() -> Dict[str, CountryConfig]:
     config_path = os.environ.get(

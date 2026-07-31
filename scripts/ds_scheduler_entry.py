@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from gateway.main import execute_request
 from gateway.models import GatewayRequest
 from gateway.response import build_response
-from gateway.utils import decode_payload_b64
+from gateway.utils import decode_payload_b64, decode_payload_file
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ds-token", required=True)
     parser.add_argument("--request-id", default="")
     parser.add_argument("--payload-b64", default="")
+    parser.add_argument("--payload-file", default="")
     return parser.parse_args()
 
 
@@ -35,7 +36,7 @@ def main() -> None:
             action=args.action.strip(),
             ds_token=args.ds_token.strip(),
             request_id=args.request_id.strip(),
-            payload=decode_payload_b64(args.payload_b64),
+            payload=decode_payload_file(args.payload_file) if args.payload_file else decode_payload_b64(args.payload_b64),
         )
         print(json.dumps(execute_request(request), ensure_ascii=False))
     except Exception as exc:
