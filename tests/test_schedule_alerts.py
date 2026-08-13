@@ -234,6 +234,126 @@ class ScheduleAlertUpdateTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual("SUCCESS", client.calls[1]["form"]["warningType"])
 
+    def test_returned_rollback_payload_rebuilds_full_original_form(self):
+        before = original_schedule()
+        after = original_schedule(warningType="FAILURE", warningGroupId=42)
+        update_client = FakeClient([
+            (True, {"code": 0, "data": before}),
+            (True, {"code": 0, "data": True}),
+            (True, {"code": 0, "data": after}),
+        ])
+        ok, result = update_client.update_schedule({
+            "project_code": "100",
+            "schedule_id": "501",
+            "warning_type": "FAILURE",
+            "warning_group_id": 42,
+        })
+        self.assertTrue(ok)
+
+        rollback_client = FakeClient([(True, {"code": 0, "data": True})])
+        rollback_ok, _ = rollback_client.update_schedule(result["rollback_payload"])
+
+        self.assertTrue(rollback_ok)
+        form = rollback_client.calls[0]["form"]
+        self.assertEqual("NONE", form["warningType"])
+        self.assertEqual("1", str(form["warningGroupId"]))
+        self.assertEqual(before["schedule"], json.loads(form["schedule"]))
+        self.assertEqual(before["startParams"], form["startParams"])
+        self.assertEqual("ONLINE", form["releaseState"])
+
+    def test_transient_uncertain_write_reads_state_before_retry(self):
+        before = original_schedule()
+        after = original_schedule(warningType="FAILURE", warningGroupId=42)
+        client = FakeClient([
+            (True, {"code": 0, "data": before}),
+            (False, {"status": 503, "body": {"message": "timeout"}}),
+            (True, {"code": 0, "data": before}),
+            (True, {"code": 0, "data": True}),
+            (True, {"code": 0, "data": after}),
+        ])
+
+        ok, result = client.update_schedule({
+            "project_code": "100",
+            "schedule_id": "501",
+            "warning_type": "FAILURE",
+            "warning_group_id": 42,
+            "retry_attempts": 2,
+            "retry_delay_ms": 0,
+        })
+
+        self.assertTrue(ok)
+        self.assertEqual("UPDATED", result["status"])
+        self.assertEqual(["GET", "PUT", "GET", "PUT", "GET"], [call["method"] for call in client.calls])
+
+    def test_failed_write_with_partial_change_is_rolled_back(self):
+        before = original_schedule()
+        partial = original_schedule(warningType="FAILURE", warningGroupId=1)
+        client = FakeClient([
+            (True, {"code": 0, "data": before}),
+            (False, {"status": 400, "body": {"message": "rejected after partial write"}}),
+            (True, {"code": 0, "data": partial}),
+            (True, {"code": 0, "data": True}),
+            (True, {"code": 0, "data": before}),
+        ])
+
+        ok, result = client.update_schedule({
+            "project_code": "100",
+            "schedule_id": "501",
+            "warning_type": "FAILURE",
+            "warning_group_id": 42,
+        })
+
+        self.assertFalse(ok)
+        self.assertEqual("FAILED_ROLLED_BACK", result["status"])
+        self.assertEqual(["GET", "PUT", "GET", "PUT", "GET"], [call["method"] for call in client.calls])
+
+    def test_non_transient_failed_write_is_not_retried_when_unchanged(self):
+        before = original_schedule()
+        client = FakeClient([
+            (True, {"code": 0, "data": before}),
+            (False, {"status": 400, "body": {"message": "validation error"}}),
+            (True, {"code": 0, "data": before}),
+        ])
+
+        ok, result = client.update_schedule({
+            "project_code": "100",
+            "schedule_id": "501",
+            "warning_type": "FAILURE",
+            "warning_group_id": 42,
+            "retry_attempts": 5,
+            "retry_delay_ms": 0,
+        })
+
+        self.assertFalse(ok)
+        self.assertEqual("FAILED_UNCHANGED", result["status"])
+        self.assertEqual(1, sum(call["method"] == "PUT" for call in client.calls))
+
+    def test_failed_rollback_is_reported_explicitly(self):
+        before = original_schedule()
+        corrupted = original_schedule(
+            warningType="FAILURE",
+            warningGroupId=42,
+            workerGroup="wrong-worker",
+        )
+        client = FakeClient([
+            (True, {"code": 0, "data": before}),
+            (True, {"code": 0, "data": True}),
+            (True, {"code": 0, "data": corrupted}),
+            (False, {"status": 400, "body": {"message": "rollback rejected"}}),
+            (True, {"code": 0, "data": corrupted}),
+        ])
+
+        ok, result = client.update_schedule({
+            "project_code": "100",
+            "schedule_id": "501",
+            "warning_type": "FAILURE",
+            "warning_group_id": 42,
+        })
+
+        self.assertFalse(ok)
+        self.assertEqual("FAILED_ROLLBACK_FAILED", result["status"])
+        self.assertIn("worker_group", result["rollback_mismatches"])
+
 
 class FixtureBatchClient(DolphinSchedulerClient):
     def __init__(self, projects=None, alert_group=None, workflows=None, schedules=None):
@@ -431,6 +551,62 @@ class BatchScheduleAlertTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual("BATCH_PREFLIGHT_FAILED", result["code"])
         self.assertFalse(any(call[0] in {"PUT", "POST"} for call in client.calls))
+
+
+class MutationBatchClient(FixtureBatchClient):
+    def __init__(self, outcomes):
+        super().__init__(
+            projects={"DW_DWB": "100"},
+            workflows={"100": [
+                {"code": 9001, "name": "first", "releaseState": "ONLINE"},
+                {"code": 9002, "name": "second", "releaseState": "ONLINE"},
+            ]},
+            schedules={"100": [
+                original_schedule(id=501, processDefinitionCode=9001, processDefinitionName="first"),
+                original_schedule(id=502, processDefinitionCode=9002, processDefinitionName="second"),
+            ]},
+        )
+        self.outcomes = list(outcomes)
+        self.update_calls = []
+
+    def update_schedule(self, payload):
+        self.update_calls.append(dict(payload))
+        return self.outcomes.pop(0)
+
+
+class BatchScheduleAlertMutationTests(unittest.TestCase):
+    def test_partial_failure_is_visible_without_hiding_success(self):
+        client = MutationBatchClient([
+            (True, {"status": "UPDATED", "rollback_payload": {"schedule_id": 501}}),
+            (False, {"status": "FAILED_ROLLED_BACK", "rollback_payload": {"schedule_id": 502}}),
+        ])
+
+        ok, result = client.batch_update_schedule_alerts({
+            "project_names": ["DW_DWB"],
+            "workflow_release_state": "ONLINE",
+            "schedule_release_state": "ONLINE",
+            "warning_type": "FAILURE",
+            "warning_group_name": "n8n告警触发器",
+            "dry_run": False,
+            "retry_attempts": 2,
+            "retry_delay_ms": 0,
+            "rate_limit_ms": 0,
+        })
+
+        self.assertFalse(ok)
+        self.assertEqual(["UPDATED", "FAILED_ROLLED_BACK"], [item["status"] for item in result["results"]])
+        self.assertEqual(2, len(client.update_calls))
+        self.assertEqual(2, client.update_calls[0]["retry_attempts"])
+        self.assertEqual({
+            "total": 2,
+            "matched": 2,
+            "updated": 1,
+            "skipped": 0,
+            "failed": 1,
+            "verification_failed": 0,
+            "rolled_back": 1,
+            "rollback_failed": 0,
+        }, result["summary"])
 
 
 if __name__ == "__main__":

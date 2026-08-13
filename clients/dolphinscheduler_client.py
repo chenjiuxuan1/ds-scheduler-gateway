@@ -436,11 +436,35 @@ class DolphinSchedulerClient:
             )
         )
         if alert_only:
+            retry_attempts = payload.get("retry_attempts", 2)
+            retry_delay_ms = payload.get("retry_delay_ms", 250)
+            if (
+                isinstance(retry_attempts, bool)
+                or not isinstance(retry_attempts, int)
+                or retry_attempts < 1
+                or retry_attempts > 5
+            ):
+                return False, {
+                    "code": "INVALID_RETRY_ATTEMPTS",
+                    "message": "retry_attempts must be an integer between 1 and 5",
+                }
+            if (
+                isinstance(retry_delay_ms, bool)
+                or not isinstance(retry_delay_ms, int)
+                or retry_delay_ms < 0
+                or retry_delay_ms > 10000
+            ):
+                return False, {
+                    "code": "INVALID_RETRY_DELAY",
+                    "message": "retry_delay_ms must be an integer between 0 and 10000",
+                }
             return self._update_schedule_alerts_safely(
                 project_code=project_code,
                 schedule_id=schedule_id,
                 warning_type=warning_type if warning_type not in (None, "") else None,
                 warning_group_id=warning_group_id if warning_group_id not in (None, "") else None,
+                retry_attempts=retry_attempts,
+                retry_delay_ms=retry_delay_ms,
             )
 
         forms = self._build_schedule_forms(payload, project_code=project_code, workflow_code=workflow_code)
@@ -467,6 +491,8 @@ class DolphinSchedulerClient:
         schedule_id: str,
         warning_type: Any,
         warning_group_id: Any,
+        retry_attempts: int,
+        retry_delay_ms: int,
     ) -> Tuple[bool, Any]:
         ok, original_result = self.get_schedule({
             "project_code": project_code,
@@ -488,19 +514,77 @@ class DolphinSchedulerClient:
             warning_group_id=warning_group_id,
         )
         rollback_payload = build_rollback_payload(self.config.country, project_code, original)
-        ok, update_result = self.request(
-            "PUT",
-            f"/projects/{project_code}/schedules/{schedule_id}",
-            form=target_form,
-        )
-        if not ok or not self._is_ds_success(update_result):
-            return False, {
-                "status": "FAILED_UNCHANGED",
+        update_result: Any = None
+        for attempt in range(1, retry_attempts + 1):
+            ok, update_result = self.request(
+                "PUT",
+                f"/projects/{project_code}/schedules/{schedule_id}",
+                form=target_form,
+            )
+            if ok and self._is_ds_success(update_result):
+                break
+
+            read_ok, current_result = self.get_schedule({
                 "project_code": project_code,
                 "schedule_id": schedule_id,
-                "error": update_result,
-                "rollback_payload": rollback_payload,
-            }
+            })
+            if read_ok:
+                current = normalize_schedule_record(current_result)
+                target_mismatches = verify_alert_update(
+                    original,
+                    current,
+                    warning_type=warning_type,
+                    warning_group_id=warning_group_id,
+                )
+                if not target_mismatches:
+                    return True, self._schedule_alert_success_result(
+                        project_code,
+                        schedule_id,
+                        original,
+                        current,
+                        rollback_payload,
+                        recovered_after_uncertain_write=True,
+                    )
+                original_mismatches = verify_restored(original, current)
+                if original_mismatches:
+                    return self._rollback_schedule_alert_update(
+                        project_code=project_code,
+                        schedule_id=schedule_id,
+                        original=original,
+                        rollback_payload=rollback_payload,
+                        failure_status="FAILED_ROLLED_BACK",
+                        failure_details={
+                            "update_error": update_result,
+                            "partial_change_mismatches": original_mismatches,
+                        },
+                        retry_attempts=retry_attempts,
+                        retry_delay_ms=retry_delay_ms,
+                    )
+            else:
+                return self._rollback_schedule_alert_update(
+                    project_code=project_code,
+                    schedule_id=schedule_id,
+                    original=original,
+                    rollback_payload=rollback_payload,
+                    failure_status="FAILED_ROLLED_BACK",
+                    failure_details={
+                        "update_error": update_result,
+                        "state_read_error": current_result,
+                    },
+                    retry_attempts=retry_attempts,
+                    retry_delay_ms=retry_delay_ms,
+                )
+
+            if not self._is_transient_schedule_error(update_result) or attempt >= retry_attempts:
+                return False, {
+                    "status": "FAILED_UNCHANGED",
+                    "project_code": project_code,
+                    "schedule_id": schedule_id,
+                    "error": update_result,
+                    "rollback_payload": rollback_payload,
+                }
+            if retry_delay_ms:
+                time.sleep(retry_delay_ms / 1000)
 
         ok, verification_result = self.get_schedule({
             "project_code": project_code,
@@ -518,51 +602,117 @@ class DolphinSchedulerClient:
             else {"verification_read": {"expected": "success", "actual": verification_result}}
         )
         if not mismatches:
-            return True, {
-                "status": "UPDATED",
-                "project_code": project_code,
-                "workflow_code": original["workflow_code"],
-                "schedule_id": schedule_id,
-                "warning_type_before": original["warning_type"],
-                "warning_group_id_before": original["warning_group_id"],
-                "warning_type_after": after["warning_type"],
-                "warning_group_id_after": after["warning_group_id"],
-                "release_state_before": original["release_state"],
-                "release_state_after": after["release_state"],
-                "rollback_payload": rollback_payload,
-            }
+            return True, self._schedule_alert_success_result(
+                project_code,
+                schedule_id,
+                original,
+                after,
+                rollback_payload,
+            )
 
-        rollback_form = build_schedule_write_form(original)
-        rollback_ok, rollback_result = self.request(
-            "PUT",
-            f"/projects/{project_code}/schedules/{schedule_id}",
-            form=rollback_form,
+        return self._rollback_schedule_alert_update(
+            project_code=project_code,
+            schedule_id=schedule_id,
+            original=original,
+            rollback_payload=rollback_payload,
+            failure_status="VERIFICATION_FAILED_ROLLED_BACK",
+            failure_details={"verification_mismatches": mismatches},
+            retry_attempts=retry_attempts,
+            retry_delay_ms=retry_delay_ms,
         )
-        restored_ok = False
-        restore_mismatches: Dict[str, Any] = {}
-        if rollback_ok and self._is_ds_success(rollback_result):
+
+    def _schedule_alert_success_result(
+        self,
+        project_code: str,
+        schedule_id: str,
+        original: Dict[str, Any],
+        after: Dict[str, Any],
+        rollback_payload: Dict[str, Any],
+        *,
+        recovered_after_uncertain_write: bool = False,
+    ) -> Dict[str, Any]:
+        return {
+            "status": "UPDATED",
+            "project_code": project_code,
+            "workflow_code": original["workflow_code"],
+            "schedule_id": schedule_id,
+            "warning_type_before": original["warning_type"],
+            "warning_group_id_before": original["warning_group_id"],
+            "warning_type_after": after["warning_type"],
+            "warning_group_id_after": after["warning_group_id"],
+            "release_state_before": original["release_state"],
+            "release_state_after": after["release_state"],
+            "recovered_after_uncertain_write": recovered_after_uncertain_write,
+            "rollback_payload": rollback_payload,
+        }
+
+    def _rollback_schedule_alert_update(
+        self,
+        *,
+        project_code: str,
+        schedule_id: str,
+        original: Dict[str, Any],
+        rollback_payload: Dict[str, Any],
+        failure_status: str,
+        failure_details: Dict[str, Any],
+        retry_attempts: int,
+        retry_delay_ms: int,
+    ) -> Tuple[bool, Any]:
+        rollback_form = build_schedule_write_form(original)
+        rollback_result: Any = None
+        rollback_mismatches: Dict[str, Any] = {}
+        for attempt in range(1, retry_attempts + 1):
+            rollback_ok, rollback_result = self.request(
+                "PUT",
+                f"/projects/{project_code}/schedules/{schedule_id}",
+                form=rollback_form,
+            )
             read_ok, restored_result = self.get_schedule({
                 "project_code": project_code,
                 "schedule_id": schedule_id,
             })
             if read_ok:
-                restore_mismatches = verify_restored(
+                rollback_mismatches = verify_restored(
                     original,
                     normalize_schedule_record(restored_result),
                 )
-                restored_ok = not restore_mismatches
+                if not rollback_mismatches:
+                    return False, {
+                        "status": failure_status,
+                        "project_code": project_code,
+                        "schedule_id": schedule_id,
+                        **failure_details,
+                        "rollback_payload": rollback_payload,
+                    }
             else:
-                restore_mismatches = {"restore_read": {"expected": "success", "actual": restored_result}}
-
-        status = "VERIFICATION_FAILED_ROLLED_BACK" if restored_ok else "FAILED_ROLLBACK_FAILED"
+                rollback_mismatches = {
+                    "restore_read": {"expected": "success", "actual": restored_result}
+                }
+            if (
+                rollback_ok
+                or not self._is_transient_schedule_error(rollback_result)
+                or attempt >= retry_attempts
+            ):
+                break
+            if retry_delay_ms:
+                time.sleep(retry_delay_ms / 1000)
         return False, {
-            "status": status,
+            "status": "FAILED_ROLLBACK_FAILED",
             "project_code": project_code,
             "schedule_id": schedule_id,
-            "verification_mismatches": mismatches,
-            "rollback_mismatches": restore_mismatches,
+            **failure_details,
+            "rollback_error": rollback_result,
+            "rollback_mismatches": rollback_mismatches,
             "rollback_payload": rollback_payload,
         }
+
+    def _is_transient_schedule_error(self, result: Any) -> bool:
+        if not isinstance(result, dict):
+            return True
+        if result.get("error"):
+            return True
+        status = self._safe_int(result.get("status"))
+        return status == 429 or 500 <= status <= 599
 
     def batch_update_schedule_alerts(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         validation_error = self._validate_batch_schedule_alert_payload(payload)
@@ -575,6 +725,9 @@ class DolphinSchedulerClient:
         workflow_release_state = str(payload.get("workflow_release_state") or "ONLINE").strip().upper()
         schedule_release_state = str(payload.get("schedule_release_state") or "ONLINE").strip().upper()
         dry_run = payload.get("dry_run", True)
+        retry_attempts = payload.get("retry_attempts", 2)
+        retry_delay_ms = payload.get("retry_delay_ms", 250)
+        rate_limit_ms = payload.get("rate_limit_ms", 100)
 
         resolved_projects = []
         preflight_errors = []
@@ -651,6 +804,7 @@ class DolphinSchedulerClient:
             })
 
         batch_results = []
+        mutation_count = 0
         for project in discovered_projects:
             project_code = project["project_code"]
             workflow_by_code = {}
@@ -714,12 +868,17 @@ class DolphinSchedulerClient:
                         snapshot,
                     )
                 else:
+                    if mutation_count and rate_limit_ms:
+                        time.sleep(rate_limit_ms / 1000)
                     update_ok, update_result = self.update_schedule({
                         "project_code": project_code,
                         "schedule_id": snapshot["id"],
                         "warning_type": warning_type,
                         "warning_group_id": target_group_id,
+                        "retry_attempts": retry_attempts,
+                        "retry_delay_ms": retry_delay_ms,
                     })
+                    mutation_count += 1
                     row.update(update_result if isinstance(update_result, dict) else {"error": update_result})
                     if update_ok:
                         row["status"] = "UPDATED"
@@ -727,14 +886,15 @@ class DolphinSchedulerClient:
                         row.setdefault("status", "FAILED_UNCHANGED")
                 batch_results.append(row)
 
-        return True, {
+        summary = self._summarize_batch_alert_results(batch_results)
+        return summary["failed"] == 0, {
             "country": self.config.country,
             "dry_run": dry_run,
             "warning_group": {
                 "id": target_group_id,
                 "group_name": warning_group_name,
             },
-            "summary": self._summarize_batch_alert_results(batch_results),
+            "summary": summary,
             "results": batch_results,
         }
 
@@ -767,6 +927,17 @@ class DolphinSchedulerClient:
                 "code": "INVALID_DRY_RUN",
                 "message": "dry_run must be a boolean",
             }
+        for field, default, minimum, maximum, code in (
+            ("retry_attempts", 2, 1, 5, "INVALID_RETRY_ATTEMPTS"),
+            ("retry_delay_ms", 250, 0, 10000, "INVALID_RETRY_DELAY"),
+            ("rate_limit_ms", 100, 0, 10000, "INVALID_RATE_LIMIT"),
+        ):
+            value = payload.get(field, default)
+            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+                return {
+                    "code": code,
+                    "message": f"{field} must be an integer between {minimum} and {maximum}",
+                }
         workflow_state = str(payload.get("workflow_release_state") or "ONLINE").strip().upper()
         schedule_state = str(payload.get("schedule_release_state") or "ONLINE").strip().upper()
         if workflow_state != "ONLINE" or schedule_state != "ONLINE":
@@ -810,9 +981,17 @@ class DolphinSchedulerClient:
 
     def _summarize_batch_alert_results(self, results: list[Dict[str, Any]]) -> Dict[str, int]:
         statuses = [str(item.get("status") or "") for item in results]
+        matched_statuses = {
+            "DRY_RUN_MATCHED",
+            "UPDATED",
+            "FAILED_UNCHANGED",
+            "FAILED_ROLLED_BACK",
+            "VERIFICATION_FAILED_ROLLED_BACK",
+            "FAILED_ROLLBACK_FAILED",
+        }
         return {
             "total": len(results),
-            "matched": statuses.count("DRY_RUN_MATCHED"),
+            "matched": sum(status in matched_statuses for status in statuses),
             "updated": statuses.count("UPDATED"),
             "skipped": sum(status.startswith("SKIPPED_") for status in statuses),
             "failed": sum(
@@ -3639,9 +3818,17 @@ class DolphinSchedulerClient:
         environment_code = str(payload.get("environment_code") or self.config.environment_code or "").strip()
         if environment_code:
             base_form["environmentCode"] = environment_code
-        custom_params = payload.get("custom_params") or {}
-        if custom_params:
-            base_form["startParams"] = json.dumps(custom_params, ensure_ascii=False)
+        start_params = payload.get("start_params")
+        if start_params not in (None, ""):
+            base_form["startParams"] = (
+                start_params
+                if isinstance(start_params, str)
+                else json.dumps(start_params, ensure_ascii=False)
+            )
+        else:
+            custom_params = payload.get("custom_params") or {}
+            if custom_params:
+                base_form["startParams"] = json.dumps(custom_params, ensure_ascii=False)
         return [
             (
                 "workflow_definition_code",
