@@ -27,7 +27,7 @@ class FakeClient(DolphinSchedulerClient):
         self.calls.append({
             "method": method,
             "path": path,
-            "query": query,
+            "query": dict(query) if query else query,
             "form": form,
             "json_body": json_body,
         })
@@ -109,6 +109,26 @@ class AlertGroupLookupTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual("AMBIGUOUS_ALERT_GROUP", result["code"])
         self.assertEqual([7, 8], [item["id"] for item in result["candidates"]])
+
+    def test_exact_alert_group_checks_all_result_pages_for_duplicates(self):
+        client = FakeClient([
+            (True, {"code": 0, "data": {"total": 2, "totalList": [
+                {"id": 7, "groupName": "n8n告警触发器"},
+            ]}}),
+            (True, {"code": 0, "data": {"total": 2, "totalList": [
+                {"id": 8, "groupName": "n8n告警触发器"},
+            ]}}),
+        ])
+
+        ok, result = client.list_alert_groups({
+            "search_val": "n8n告警触发器",
+            "page_no": 1,
+            "page_size": 1,
+        })
+
+        self.assertFalse(ok)
+        self.assertEqual("AMBIGUOUS_ALERT_GROUP", result["code"])
+        self.assertEqual([1, 2], [call["query"]["pageNo"] for call in client.calls])
 
 
 def original_schedule(**changes):
@@ -233,6 +253,34 @@ class ScheduleAlertUpdateTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual("SUCCESS", client.calls[1]["form"]["warningType"])
+
+    def test_n8n_empty_defaults_still_use_alert_only_safe_path(self):
+        before = original_schedule()
+        after = original_schedule(warningType="FAILURE", warningGroupId=42)
+        client = FakeClient([
+            (True, {"code": 0, "data": before}),
+            (True, {"code": 0, "data": True}),
+            (True, {"code": 0, "data": after}),
+        ])
+
+        ok, _ = client.update_schedule({
+            "project_code": "100",
+            "schedule_id": "501",
+            "warning_type": "FAILURE",
+            "warning_group_id": 42,
+            "schedule_json": "",
+            "crontab": "",
+            "custom_params": {},
+            "failure_strategy": "",
+            "worker_group": "",
+            "tenant_code": "",
+            "environment_code": "",
+            "release_state": "",
+        })
+
+        self.assertTrue(ok)
+        self.assertEqual(["GET", "PUT", "GET"], [call["method"] for call in client.calls])
+        self.assertEqual(before["schedule"], json.loads(client.calls[1]["form"]["schedule"]))
 
     def test_returned_rollback_payload_rebuilds_full_original_form(self):
         before = original_schedule()

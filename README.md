@@ -16,12 +16,14 @@
 
 - `list_projects`
 - `resolve_project`
+- `list_alert_groups`
 - `list_workflows`
 - `create_workflow`
 - `list_schedules`
 - `get_schedule`
 - `create_schedule`
 - `update_schedule`
+- `batch_update_schedule_alerts`
 - `online_schedule`
 - `offline_schedule`
 - `schedule_blast_radius`
@@ -65,6 +67,43 @@
 - 网关绝不通过修改 DolphinScheduler 元数据库来停止或强制失败实例。
 - `resolve_project` 支持按 code 或唯一精确项目名解析；名称歧义会返回
   `AMBIGUOUS_PROJECT`。
+
+## 定时告警安全更新
+
+### `list_alert_groups`
+
+支持 `cn / ine / mx / ph / pk / th`，入参为 `search_val / page_no / page_size`。不传 `search_val` 返回标准化列表；传入后只接受 `group_name` 精确唯一匹配。0 条返回 `ALERT_GROUP_NOT_FOUND`，多条返回 `AMBIGUOUS_ALERT_GROUP`。
+
+### `update_schedule` 告警字段模式
+
+只传 `warning_type` 和/或 `warning_group_id` 时，网关先调用 `get_schedule` 保存完整原配置，再构建无损表单。支持的 `warning_type` 为 `NONE / SUCCESS / FAILURE / ALL`。
+
+写后再次 `get_schedule`，逐项验证告警字段、cron、起止时间、时区、失败策略、worker group、tenant、environment、优先级、start params 和原 `releaseState`。任何不一致都会自动写回原快照并再次验证。网关不会自动调用定时上线/下线接口。
+
+响应包含不含 token 的 `rollback_payload`；该 payload 可作为 `update_schedule` 的 payload 恢复原配置，恢复后仍应显式调用 `get_schedule` 回查。
+
+### `batch_update_schedule_alerts`
+
+必填：
+
+- `project_names`：唯一非空项目名数组
+- `warning_type`
+- `warning_group_name`
+
+安全限制：
+
+- `dry_run` 默认 `true`
+- `workflow_release_state` 和 `schedule_release_state` 必须都是 `ONLINE`
+- 服务端实时解析项目 code、工作流、定时和本国告警组 ID，不使用旧 catalog code，也不跨国家复用告警组 ID
+- 任一项目或告警组缺失/歧义时，整个国家预检以零写入结束
+- 正式执行逐条串行，瞬时错误才做有限重试；不确定写入会先回查再决定是否重试
+- 单条失败不掩盖，验证失败自动恢复原快照
+
+逐条状态：`DRY_RUN_MATCHED / UPDATED / SKIPPED_ALREADY_MATCHED / SKIPPED_NOT_ONLINE / FAILED_UNCHANGED / FAILED_ROLLED_BACK / VERIFICATION_FAILED_ROLLED_BACK / FAILED_ROLLBACK_FAILED`。
+
+汇总字段：`total / matched / updated / skipped / failed / verification_failed / rolled_back / rollback_failed`。
+
+生产门禁固定为：精确查告警组 → 单国家单项目 dry-run → 单条正式更新 → `get_schedule` → rollback → 再次 `get_schedule`。恢复完全正确后才能扩大 dry-run，批量正式执行仍需用户明确批准。
 
 
 ## 新增：定时任务失败监控

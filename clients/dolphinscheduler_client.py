@@ -174,24 +174,40 @@ class DolphinSchedulerClient:
             "pageSize": payload.get("page_size", 20),
             "searchVal": search_val,
         }
-        ok, result = self.request("GET", "/alert-groups", query=query)
-        if not ok:
-            return False, result
-
         items = []
-        for raw in self._extract_total_list(result):
-            alert_instances = raw.get("alertInstances")
-            if alert_instances is None:
-                alert_instances = raw.get("alertInstanceIds")
-            if alert_instances is None:
-                alert_instances = raw.get("instanceIds")
-            items.append({
-                "id": raw.get("id") or raw.get("alertGroupId"),
-                "group_name": str(raw.get("groupName") or raw.get("name") or "").strip(),
-                "description": str(raw.get("description") or "").strip(),
-                "alert_instances": alert_instances,
-                "raw": deepcopy(raw),
-            })
+        result: Any = {}
+        for _ in range(100):
+            ok, result = self.request("GET", "/alert-groups", query=query)
+            if not ok:
+                return False, result
+            raw_items = self._extract_total_list(result)
+            for raw in raw_items:
+                alert_instances = raw.get("alertInstances")
+                if alert_instances is None:
+                    alert_instances = raw.get("alertInstanceIds")
+                if alert_instances is None:
+                    alert_instances = raw.get("instanceIds")
+                items.append({
+                    "id": raw.get("id") or raw.get("alertGroupId"),
+                    "group_name": str(raw.get("groupName") or raw.get("name") or "").strip(),
+                    "description": str(raw.get("description") or "").strip(),
+                    "alert_instances": alert_instances,
+                    "raw": deepcopy(raw),
+                })
+            if not search_val:
+                break
+            data = result.get("data") if isinstance(result, dict) else None
+            total = data.get("total") if isinstance(data, dict) else None
+            if total is not None and len(items) >= self._safe_int(total):
+                break
+            if len(raw_items) < self._safe_int(query["pageSize"]):
+                break
+            query["pageNo"] = self._safe_int(query["pageNo"]) + 1
+        else:
+            return False, {
+                "code": "PAGINATION_LIMIT_EXCEEDED",
+                "message": "alert group lookup exceeded 100 pages",
+            }
 
         if not search_val:
             data = result.get("data") if isinstance(result, dict) else None
@@ -417,7 +433,7 @@ class DolphinSchedulerClient:
         alert_only = (
             warning_type not in (None, "") or warning_group_id not in (None, "")
         ) and not any(
-            payload.get(key) not in (None, "")
+            payload.get(key) not in (None, "", {}, [])
             for key in (
                 "schedule_json",
                 "crontab",
