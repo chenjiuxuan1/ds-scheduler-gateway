@@ -564,6 +564,266 @@ class DolphinSchedulerClient:
             "rollback_payload": rollback_payload,
         }
 
+    def batch_update_schedule_alerts(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        validation_error = self._validate_batch_schedule_alert_payload(payload)
+        if validation_error:
+            return False, validation_error
+
+        project_names = [str(value).strip() for value in payload["project_names"]]
+        warning_type = normalize_warning_type(payload.get("warning_type"))
+        warning_group_name = str(payload.get("warning_group_name") or "").strip()
+        workflow_release_state = str(payload.get("workflow_release_state") or "ONLINE").strip().upper()
+        schedule_release_state = str(payload.get("schedule_release_state") or "ONLINE").strip().upper()
+        dry_run = payload.get("dry_run", True)
+
+        resolved_projects = []
+        preflight_errors = []
+        for project_name in project_names:
+            ok, result = self.resolve_project({"project_name": project_name})
+            if not ok:
+                error = deepcopy(result) if isinstance(result, dict) else {"message": str(result)}
+                error.setdefault("code", "PROJECT_RESOLUTION_FAILED")
+                error["project_name"] = project_name
+                preflight_errors.append(error)
+                continue
+            resolved_projects.append({
+                "project_name": project_name,
+                "project_code": str(result.get("project_code") or "").strip(),
+            })
+
+        group_ok, group_result = self.list_alert_groups({
+            "search_val": warning_group_name,
+            "page_no": 1,
+            "page_size": 200,
+        })
+        if not group_ok:
+            error = deepcopy(group_result) if isinstance(group_result, dict) else {"message": str(group_result)}
+            error.setdefault("code", "ALERT_GROUP_RESOLUTION_FAILED")
+            preflight_errors.append(error)
+        elif group_result.get("id") in (None, ""):
+            preflight_errors.append({
+                "code": "INVALID_ALERT_GROUP",
+                "message": f"alert group has no id: {warning_group_name}",
+            })
+
+        if preflight_errors:
+            return False, {
+                "code": "BATCH_PREFLIGHT_FAILED",
+                "message": "country preflight failed; no schedules were modified",
+                "country": self.config.country,
+                "errors": preflight_errors,
+                "summary": self._summarize_batch_alert_results([]),
+                "results": [],
+            }
+
+        target_group_id = group_result["id"]
+        discovered_projects = []
+        for project in resolved_projects:
+            project_code = project["project_code"]
+            workflows_ok, workflows_result = self._collect_paginated_items(
+                self.list_workflows,
+                {"project_code": project_code, "search_val": ""},
+            )
+            schedules_ok, schedules_result = self._collect_paginated_items(
+                self.list_schedules,
+                {"project_code": project_code, "search_val": ""},
+            )
+            if not workflows_ok or not schedules_ok:
+                return False, {
+                    "code": "BATCH_PREFLIGHT_FAILED",
+                    "message": "country discovery failed; no schedules were modified",
+                    "country": self.config.country,
+                    "errors": [{
+                        "code": "PROJECT_DISCOVERY_FAILED",
+                        "project_name": project["project_name"],
+                        "project_code": project_code,
+                        "workflows_error": None if workflows_ok else workflows_result,
+                        "schedules_error": None if schedules_ok else schedules_result,
+                    }],
+                    "summary": self._summarize_batch_alert_results([]),
+                    "results": [],
+                }
+
+            discovered_projects.append({
+                **project,
+                "workflows": workflows_result,
+                "schedules": schedules_result,
+            })
+
+        batch_results = []
+        for project in discovered_projects:
+            project_code = project["project_code"]
+            workflow_by_code = {}
+            for workflow in project["workflows"]:
+                workflow_meta = workflow.get("workflowDefinition") if isinstance(workflow.get("workflowDefinition"), dict) else workflow
+                workflow_code = str(
+                    workflow_meta.get("code")
+                    or workflow.get("workflowDefinitionCode")
+                    or workflow.get("processDefinitionCode")
+                    or ""
+                ).strip()
+                if workflow_code:
+                    workflow_by_code[workflow_code] = {
+                        "name": str(
+                            workflow_meta.get("name")
+                            or workflow.get("workflowDefinitionName")
+                            or workflow.get("processDefinitionName")
+                            or ""
+                        ).strip(),
+                        "release_state": str(
+                            workflow_meta.get("releaseState")
+                            or workflow.get("releaseState")
+                            or ""
+                        ).strip().upper(),
+                    }
+
+            for schedule_record in project["schedules"]:
+                snapshot = normalize_schedule_record(schedule_record)
+                workflow_code = str(snapshot.get("workflow_code") or "").strip()
+                workflow = workflow_by_code.get(workflow_code, {"name": snapshot["workflow_name"], "release_state": ""})
+                row = {
+                    "country": self.config.country,
+                    "project_name": project["project_name"],
+                    "project_code": project_code,
+                    "workflow_name": workflow["name"] or snapshot["workflow_name"],
+                    "workflow_code": snapshot["workflow_code"],
+                    "workflow_release_state": workflow["release_state"],
+                    "schedule_id": snapshot["id"],
+                    "schedule_release_state": snapshot["release_state"],
+                    "original_warning_type": snapshot["warning_type"],
+                    "original_warning_group_id": snapshot["warning_group_id"],
+                    "target_warning_type": warning_type,
+                    "target_warning_group_id": target_group_id,
+                    "target_warning_group_name": warning_group_name,
+                }
+                if (
+                    workflow["release_state"] != workflow_release_state
+                    or snapshot["release_state"].upper() != schedule_release_state
+                ):
+                    row["status"] = "SKIPPED_NOT_ONLINE"
+                elif (
+                    snapshot["warning_type"] == warning_type
+                    and str(snapshot["warning_group_id"]) == str(target_group_id)
+                ):
+                    row["status"] = "SKIPPED_ALREADY_MATCHED"
+                elif dry_run:
+                    row["status"] = "DRY_RUN_MATCHED"
+                    row["rollback_payload"] = build_rollback_payload(
+                        self.config.country,
+                        project_code,
+                        snapshot,
+                    )
+                else:
+                    update_ok, update_result = self.update_schedule({
+                        "project_code": project_code,
+                        "schedule_id": snapshot["id"],
+                        "warning_type": warning_type,
+                        "warning_group_id": target_group_id,
+                    })
+                    row.update(update_result if isinstance(update_result, dict) else {"error": update_result})
+                    if update_ok:
+                        row["status"] = "UPDATED"
+                    else:
+                        row.setdefault("status", "FAILED_UNCHANGED")
+                batch_results.append(row)
+
+        return True, {
+            "country": self.config.country,
+            "dry_run": dry_run,
+            "warning_group": {
+                "id": target_group_id,
+                "group_name": warning_group_name,
+            },
+            "summary": self._summarize_batch_alert_results(batch_results),
+            "results": batch_results,
+        }
+
+    def _validate_batch_schedule_alert_payload(self, payload: Dict[str, Any]) -> Dict[str, Any] | None:
+        project_names = payload.get("project_names")
+        if (
+            not isinstance(project_names, list)
+            or not project_names
+            or any(not isinstance(value, str) or not value.strip() for value in project_names)
+            or len({value.strip() for value in project_names}) != len(project_names)
+        ):
+            return {
+                "code": "INVALID_PROJECT_NAMES",
+                "message": "project_names must be a non-empty list of unique non-empty strings",
+            }
+        try:
+            normalize_warning_type(payload.get("warning_type"))
+        except ValueError:
+            return {
+                "code": "INVALID_WARNING_TYPE",
+                "message": "warning_type must be one of NONE, SUCCESS, FAILURE, ALL",
+            }
+        if not str(payload.get("warning_group_name") or "").strip():
+            return {
+                "code": "INVALID_WARNING_GROUP_NAME",
+                "message": "warning_group_name is required",
+            }
+        if "dry_run" in payload and not isinstance(payload["dry_run"], bool):
+            return {
+                "code": "INVALID_DRY_RUN",
+                "message": "dry_run must be a boolean",
+            }
+        workflow_state = str(payload.get("workflow_release_state") or "ONLINE").strip().upper()
+        schedule_state = str(payload.get("schedule_release_state") or "ONLINE").strip().upper()
+        if workflow_state != "ONLINE" or schedule_state != "ONLINE":
+            return {
+                "code": "INVALID_RELEASE_STATE_FILTER",
+                "message": "workflow_release_state and schedule_release_state must both be ONLINE",
+            }
+        return None
+
+    def _collect_paginated_items(
+        self,
+        fetch: Any,
+        payload: Dict[str, Any],
+        *,
+        page_size: int = 200,
+        max_pages: int = 100,
+    ) -> Tuple[bool, Any]:
+        items = []
+        for page_no in range(1, max_pages + 1):
+            ok, result = fetch({
+                **payload,
+                "page_no": page_no,
+                "page_size": page_size,
+            })
+            if not ok:
+                return False, result
+            page_items = self._extract_total_list(result)
+            items.extend(page_items)
+            data = result.get("data") if isinstance(result, dict) else None
+            total = data.get("total") if isinstance(data, dict) else None
+            if total is not None and len(items) >= self._safe_int(total):
+                break
+            if len(page_items) < page_size:
+                break
+        else:
+            return False, {
+                "code": "PAGINATION_LIMIT_EXCEEDED",
+                "message": f"listing exceeded {max_pages} pages",
+            }
+        return True, items
+
+    def _summarize_batch_alert_results(self, results: list[Dict[str, Any]]) -> Dict[str, int]:
+        statuses = [str(item.get("status") or "") for item in results]
+        return {
+            "total": len(results),
+            "matched": statuses.count("DRY_RUN_MATCHED"),
+            "updated": statuses.count("UPDATED"),
+            "skipped": sum(status.startswith("SKIPPED_") for status in statuses),
+            "failed": sum(
+                status.startswith("FAILED_") or status.startswith("VERIFICATION_FAILED")
+                for status in statuses
+            ),
+            "verification_failed": sum(status.startswith("VERIFICATION_FAILED") for status in statuses),
+            "rolled_back": sum(status.endswith("ROLLED_BACK") for status in statuses),
+            "rollback_failed": statuses.count("FAILED_ROLLBACK_FAILED"),
+        }
+
     def online_schedule(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         schedule_id = self._resolve_schedule_id(payload)
         if not schedule_id:
