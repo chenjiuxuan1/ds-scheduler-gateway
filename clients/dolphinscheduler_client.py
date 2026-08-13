@@ -159,6 +159,56 @@ class DolphinSchedulerClient:
             query=query,
         )
 
+    def list_alert_groups(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        search_val = str(payload.get("search_val") or "").strip()
+        query = {
+            "pageNo": payload.get("page_no", 1),
+            "pageSize": payload.get("page_size", 20),
+            "searchVal": search_val,
+        }
+        ok, result = self.request("GET", "/alert-groups", query=query)
+        if not ok:
+            return False, result
+
+        items = []
+        for raw in self._extract_total_list(result):
+            alert_instances = raw.get("alertInstances")
+            if alert_instances is None:
+                alert_instances = raw.get("alertInstanceIds")
+            if alert_instances is None:
+                alert_instances = raw.get("instanceIds")
+            items.append({
+                "id": raw.get("id") or raw.get("alertGroupId"),
+                "group_name": str(raw.get("groupName") or raw.get("name") or "").strip(),
+                "description": str(raw.get("description") or "").strip(),
+                "alert_instances": alert_instances,
+                "raw": deepcopy(raw),
+            })
+
+        if not search_val:
+            data = result.get("data") if isinstance(result, dict) else None
+            total = data.get("total") if isinstance(data, dict) else None
+            return True, {
+                "items": items,
+                "total": total if total is not None else len(items),
+                "page_no": query["pageNo"],
+                "page_size": query["pageSize"],
+            }
+
+        matches = [item for item in items if item["group_name"] == search_val]
+        if not matches:
+            return False, {
+                "code": "ALERT_GROUP_NOT_FOUND",
+                "message": f"alert group not found: {search_val}",
+            }
+        if len(matches) > 1:
+            return False, {
+                "code": "AMBIGUOUS_ALERT_GROUP",
+                "message": f"multiple alert groups matched exact name: {search_val}",
+                "candidates": matches,
+            }
+        return True, matches[0]
+
     def resolve_project(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = str(payload.get("project_code") or "").strip()
         project_name = str(
