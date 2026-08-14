@@ -107,6 +107,29 @@ class InstanceActionTests(unittest.TestCase):
             result["reason"],
         )
 
+    def test_task_instances_use_workflow_instance_id_query(self):
+        client = FakeClient(config(), [
+            (True, {"code": 0, "data": [{
+                "id": 31,
+                "workflowInstanceId": 22,
+                "name": "failed_task",
+                "state": "FAILURE",
+            }]}),
+        ])
+        ok, _result = client.list_task_instances({
+            "project_code": "1",
+            "instance_id": "22",
+            "page_no": 1,
+            "page_size": 100,
+        })
+        self.assertTrue(ok)
+        self.assertEqual(
+            "/projects/1/task-instances",
+            client.calls[0]["path"],
+        )
+        self.assertEqual("22", client.calls[0]["query"]["workflowInstanceId"])
+        self.assertNotIn("processInstanceId", client.calls[0]["query"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1761,7 +1761,7 @@ class DolphinSchedulerClient:
         query = {
             "pageNo": payload.get("page_no", 1),
             "pageSize": payload.get("page_size", 100),
-            "processInstanceId": process_instance_id,
+            "workflowInstanceId": process_instance_id,
             "stateType": payload.get("state_type", ""),
             "searchVal": payload.get("search_val", ""),
         }
