@@ -1752,23 +1752,21 @@ class DolphinSchedulerClient:
                     return line[:500]
         return ""
     def list_task_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
-        project_code = payload.get("project_code") or self.config.project_code
-        process_instance_id = (
+        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        process_instance_id = self._safe_int(
             payload.get("process_instance_id")
             or payload.get("instance_id")
             or payload.get("workflow_instance_id")
         )
-        query = {
-            "pageNo": payload.get("page_no", 1),
-            "pageSize": payload.get("page_size", 100),
-            "processInstanceId": process_instance_id,
-            "stateType": payload.get("state_type", ""),
-            "searchVal": payload.get("search_val", ""),
-        }
+        if not project_code:
+            return False, {"message": "project_code is required"}
+        if process_instance_id <= 0:
+            return False, {
+                "message": "list_task_instances requires workflow/process instance id",
+            }
         return self.request(
             "GET",
-            f"/projects/{project_code}/task-instances",
-            query=query,
+            f"/projects/{project_code}/process-instances/{process_instance_id}/tasks",
         )
 
     def get_task_log(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
