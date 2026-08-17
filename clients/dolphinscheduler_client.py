@@ -1764,9 +1764,21 @@ class DolphinSchedulerClient:
             return False, {
                 "message": "list_task_instances requires workflow/process instance id",
             }
+        query = {
+            "pageNo": payload.get("page_no", 1),
+            "pageSize": payload.get("page_size", 100),
+            # DolphinScheduler 3.4 TaskInstanceController names this filter
+            # workflowInstanceId. processInstanceId is silently ignored by
+            # some deployments and the nested /process-instances/{id}/tasks
+            # route is not the task-instance paging API.
+            "workflowInstanceId": process_instance_id,
+            "stateType": payload.get("state_type", ""),
+            "searchVal": payload.get("search_val", ""),
+        }
         ok, result = self.request(
             "GET",
-            f"/projects/{project_code}/process-instances/{process_instance_id}/tasks",
+            f"/projects/{project_code}/task-instances",
+            query=query,
         )
         if not ok:
             return False, result

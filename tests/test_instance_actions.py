@@ -107,11 +107,10 @@ class InstanceActionTests(unittest.TestCase):
             result["reason"],
         )
 
-    def test_task_instances_use_exact_process_instance_endpoint(self):
+    def test_task_instances_use_ds34_workflow_instance_filter(self):
         client = FakeClient(config(), [
             (True, {"code": 0, "data": {
-                "processInstanceState": "FAILURE",
-                "taskList": [{
+                "totalList": [{
                     "id": 31,
                     "name": "failed_task",
                     "taskExecutionStatus": "FAILURE",
@@ -126,10 +125,13 @@ class InstanceActionTests(unittest.TestCase):
         })
         self.assertTrue(ok)
         self.assertEqual(
-            "/projects/1/process-instances/22/tasks",
+            "/projects/1/task-instances",
             client.calls[0]["path"],
         )
-        self.assertIsNone(client.calls[0]["query"])
+        self.assertEqual(22, client.calls[0]["query"]["workflowInstanceId"])
+        self.assertNotIn("processInstanceId", client.calls[0]["query"])
+        self.assertEqual(1, client.calls[0]["query"]["pageNo"])
+        self.assertEqual(100, client.calls[0]["query"]["pageSize"])
         task = result["data"]["totalList"][0]
         self.assertEqual(22, task["processInstanceId"])
         self.assertEqual(22, task["workflowInstanceId"])
@@ -141,6 +143,23 @@ class InstanceActionTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("instance id", result["message"])
         self.assertEqual([], client.calls)
+
+    def test_task_instances_keep_task_list_response_compatibility(self):
+        client = FakeClient(config(), [
+            (True, {"code": 0, "data": {"taskList": [{
+                "id": 32,
+                "name": "compatible_failed_task",
+                "taskExecutionStatus": "FAILURE",
+            }]}}),
+        ])
+        ok, result = client.list_task_instances({
+            "project_code": "1",
+            "process_instance_id": "23",
+        })
+        self.assertTrue(ok)
+        task = result["data"]["totalList"][0]
+        self.assertEqual(23, task["workflowInstanceId"])
+        self.assertEqual("FAILURE", task["state"])
 
 
 if __name__ == "__main__":
