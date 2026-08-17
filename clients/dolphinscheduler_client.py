@@ -1764,10 +1764,35 @@ class DolphinSchedulerClient:
             return False, {
                 "message": "list_task_instances requires workflow/process instance id",
             }
-        return self.request(
+        ok, result = self.request(
             "GET",
             f"/projects/{project_code}/process-instances/{process_instance_id}/tasks",
         )
+        if not ok:
+            return False, result
+
+        task_instances = []
+        for item in self._extract_total_list(result):
+            normalized = dict(item)
+            normalized.setdefault("processInstanceId", process_instance_id)
+            normalized.setdefault("workflowInstanceId", process_instance_id)
+            if not normalized.get("state"):
+                normalized["state"] = (
+                    normalized.get("taskExecutionStatus")
+                    or normalized.get("taskExecuteState")
+                    or normalized.get("task_execution_status")
+                    or ""
+                )
+            task_instances.append(normalized)
+
+        normalized_result = deepcopy(result) if isinstance(result, dict) else {"code": 0}
+        raw_data = normalized_result.get("data")
+        data = dict(raw_data) if isinstance(raw_data, dict) else {}
+        data["taskList"] = task_instances
+        data["totalList"] = task_instances
+        data["total"] = len(task_instances)
+        normalized_result["data"] = data
+        return True, normalized_result
 
     def get_task_log(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = str(payload.get("project_code") or self.config.project_code).strip()
@@ -2297,12 +2322,10 @@ class DolphinSchedulerClient:
         if isinstance(result, dict):
             data = result.get("data")
             if isinstance(data, dict):
-                total_list = data.get("totalList")
-                if isinstance(total_list, list):
-                    return [item for item in total_list if isinstance(item, dict)]
-                records = data.get("records")
-                if isinstance(records, list):
-                    return [item for item in records if isinstance(item, dict)]
+                for key in ("totalList", "records", "taskList", "task_list", "items", "list"):
+                    items = data.get(key)
+                    if isinstance(items, list):
+                        return [item for item in items if isinstance(item, dict)]
             if isinstance(data, list):
                 return [item for item in data if isinstance(item, dict)]
         if isinstance(result, list):

@@ -109,14 +109,16 @@ class InstanceActionTests(unittest.TestCase):
 
     def test_task_instances_use_exact_process_instance_endpoint(self):
         client = FakeClient(config(), [
-            (True, {"code": 0, "data": [{
-                "id": 31,
-                "workflowInstanceId": 22,
-                "name": "failed_task",
-                "state": "FAILURE",
-            }]}),
+            (True, {"code": 0, "data": {
+                "processInstanceState": "FAILURE",
+                "taskList": [{
+                    "id": 31,
+                    "name": "failed_task",
+                    "taskExecutionStatus": "FAILURE",
+                }],
+            }}),
         ])
-        ok, _result = client.list_task_instances({
+        ok, result = client.list_task_instances({
             "project_code": "1",
             "instance_id": "22",
             "page_no": 1,
@@ -128,6 +130,10 @@ class InstanceActionTests(unittest.TestCase):
             client.calls[0]["path"],
         )
         self.assertIsNone(client.calls[0]["query"])
+        task = result["data"]["totalList"][0]
+        self.assertEqual(22, task["processInstanceId"])
+        self.assertEqual(22, task["workflowInstanceId"])
+        self.assertEqual("FAILURE", task["state"])
 
     def test_task_instances_require_instance_id(self):
         client = FakeClient(config(), [])
