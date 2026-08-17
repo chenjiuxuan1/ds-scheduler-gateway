@@ -1772,9 +1772,13 @@ class DolphinSchedulerClient:
             # some deployments and the nested /process-instances/{id}/tasks
             # route is not the task-instance paging API.
             "workflowInstanceId": process_instance_id,
-            "stateType": payload.get("state_type", ""),
-            "searchVal": payload.get("search_val", ""),
         }
+        state_type = str(payload.get("state_type") or "").strip()
+        search_val = str(payload.get("search_val") or "").strip()
+        if state_type:
+            query["stateType"] = state_type
+        if search_val:
+            query["searchVal"] = search_val
         ok, result = self.request(
             "GET",
             f"/projects/{project_code}/task-instances",

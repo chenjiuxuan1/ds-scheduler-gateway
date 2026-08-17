@@ -130,6 +130,8 @@ class InstanceActionTests(unittest.TestCase):
         )
         self.assertEqual(22, client.calls[0]["query"]["workflowInstanceId"])
         self.assertNotIn("processInstanceId", client.calls[0]["query"])
+        self.assertNotIn("stateType", client.calls[0]["query"])
+        self.assertNotIn("searchVal", client.calls[0]["query"])
         self.assertEqual(1, client.calls[0]["query"]["pageNo"])
         self.assertEqual(100, client.calls[0]["query"]["pageSize"])
         task = result["data"]["totalList"][0]
