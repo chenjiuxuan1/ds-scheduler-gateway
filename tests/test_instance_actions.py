@@ -110,6 +110,7 @@ class InstanceActionTests(unittest.TestCase):
     def test_task_instances_use_ds34_workflow_instance_filter(self):
         client = FakeClient(config(), [
             (True, {"code": 0, "data": {
+                "total": 201,
                 "totalList": [{
                     "id": 31,
                     "name": "failed_task",
@@ -134,6 +135,9 @@ class InstanceActionTests(unittest.TestCase):
         self.assertNotIn("searchVal", client.calls[0]["query"])
         self.assertEqual(1, client.calls[0]["query"]["pageNo"])
         self.assertEqual(100, client.calls[0]["query"]["pageSize"])
+        self.assertEqual(201, result["data"]["total"])
+        self.assertEqual(1, result["data"]["pageNo"])
+        self.assertEqual(100, result["data"]["pageSize"])
         task = result["data"]["totalList"][0]
         self.assertEqual(22, task["processInstanceId"])
         self.assertEqual(22, task["workflowInstanceId"])

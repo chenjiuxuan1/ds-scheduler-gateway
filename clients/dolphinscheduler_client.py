@@ -1804,9 +1804,17 @@ class DolphinSchedulerClient:
         normalized_result = deepcopy(result) if isinstance(result, dict) else {"code": 0}
         raw_data = normalized_result.get("data")
         data = dict(raw_data) if isinstance(raw_data, dict) else {}
+        original_total = data.get("total")
         data["taskList"] = task_instances
         data["totalList"] = task_instances
-        data["total"] = len(task_instances)
+        # Keep DolphinScheduler's paging total.  Replacing it with the current
+        # page length makes callers believe page 1 is the complete result and
+        # hides failed task instances that have moved to a later page after a
+        # same-instance recovery run.
+        if original_total is None:
+            data["total"] = len(task_instances)
+        data.setdefault("pageNo", query["pageNo"])
+        data.setdefault("pageSize", query["pageSize"])
         normalized_result["data"] = data
         return True, normalized_result
 
