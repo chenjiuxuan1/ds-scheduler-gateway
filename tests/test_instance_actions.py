@@ -163,6 +163,45 @@ class InstanceActionTests(unittest.TestCase):
         self.assertEqual(23, task["workflowInstanceId"])
         self.assertEqual("FAILURE", task["state"])
 
+    def test_get_sub_workflow_instance_uses_parent_task_instance(self):
+        client = FakeClient(config(), [
+            (True, {"code": 0, "data": {"subWorkflowInstanceId": 456}}),
+        ])
+        ok, result = client.get_sub_workflow_instance({
+            "project_code": "1",
+            "task_instance_id": "123",
+        })
+        self.assertTrue(ok)
+        self.assertEqual(
+            "/projects/1/workflow-instances/query-sub-by-parent",
+            client.calls[0]["path"],
+        )
+        self.assertEqual({"taskId": 123}, client.calls[0]["query"])
+        self.assertEqual(456, result["sub_workflow_instance_id"])
+
+    def test_get_sub_workflow_instance_requires_task_instance_id(self):
+        client = FakeClient(config(), [])
+        ok, result = client.get_sub_workflow_instance({"project_code": "1"})
+        self.assertFalse(ok)
+        self.assertIn("task_instance_id", result["message"])
+        self.assertEqual([], client.calls)
+
+    def test_get_task_log_resolves_sub_workflow_without_fetching_wrapper_log(self):
+        client = FakeClient(config(), [
+            (True, {"code": 0, "data": {"subWorkflowInstanceId": 456}}),
+        ])
+        ok, result = client.get_task_log({
+            "project_code": "1",
+            "task_instance_id": "123",
+            "task_type": "SUB_WORKFLOW",
+        })
+        self.assertTrue(ok)
+        self.assertEqual(456, result["sub_workflow_instance_id"])
+        self.assertEqual(
+            "/projects/1/workflow-instances/query-sub-by-parent",
+            client.calls[0]["path"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1815,6 +1815,12 @@ class DolphinSchedulerClient:
         if not project_code:
             return False, {"message": "project_code is required"}
 
+        # A SUB_WORKFLOW task is only a control wrapper and normally has no SQL
+        # failure log of its own.  Reuse the existing read-only action contract
+        # so deployed n8n routers do not need a new action in their allow-list.
+        if str(payload.get("task_type") or "").strip().upper() == "SUB_WORKFLOW":
+            return self.get_sub_workflow_instance(payload)
+
         task_instance = None
         task_instance_id = self._safe_int(payload.get("task_instance_id"))
         if task_instance_id > 0:
@@ -1911,6 +1917,54 @@ class DolphinSchedulerClient:
             "project_code": project_code,
             "task_instance_id": task_instance_id,
             "attempts": failed_attempts,
+        }
+
+    def get_sub_workflow_instance(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        """Resolve the child workflow instance created by a SUB_WORKFLOW task.
+
+        DolphinScheduler 3.4 stores the relation against the parent task instance,
+        not the task definition code.  Keeping this as a separate read-only action
+        lets callers recurse only when they actually encounter a sub-workflow task.
+        """
+        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        task_instance_id = self._safe_int(
+            payload.get("task_instance_id") or payload.get("task_id")
+        )
+        if not project_code:
+            return False, {"message": "project_code is required"}
+        if task_instance_id <= 0:
+            return False, {
+                "message": "get_sub_workflow_instance requires task_instance_id",
+            }
+
+        ok, result = self.request(
+            "GET",
+            f"/projects/{project_code}/workflow-instances/query-sub-by-parent",
+            query={"taskId": task_instance_id},
+        )
+        if not ok:
+            return False, result
+
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, dict):
+            data = {}
+        sub_workflow_instance_id = self._safe_int(
+            data.get("subWorkflowInstanceId")
+            or data.get("sub_workflow_instance_id")
+        )
+        if sub_workflow_instance_id <= 0:
+            return False, {
+                "message": "sub workflow instance id was not returned",
+                "project_code": project_code,
+                "task_instance_id": task_instance_id,
+                "result": result,
+            }
+        return True, {
+            "project_code": project_code,
+            "task_instance_id": task_instance_id,
+            "sub_workflow_instance_id": sub_workflow_instance_id,
+            "subWorkflowInstanceId": sub_workflow_instance_id,
+            "raw_result": result,
         }
 
     def get_instance(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
