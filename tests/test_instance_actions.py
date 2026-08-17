@@ -107,7 +107,7 @@ class InstanceActionTests(unittest.TestCase):
             result["reason"],
         )
 
-    def test_task_instances_use_workflow_instance_id_query(self):
+    def test_task_instances_use_process_instance_id_query(self):
         client = FakeClient(config(), [
             (True, {"code": 0, "data": [{
                 "id": 31,
@@ -127,8 +127,8 @@ class InstanceActionTests(unittest.TestCase):
             "/projects/1/task-instances",
             client.calls[0]["path"],
         )
-        self.assertEqual("22", client.calls[0]["query"]["workflowInstanceId"])
-        self.assertNotIn("processInstanceId", client.calls[0]["query"])
+        self.assertEqual("22", client.calls[0]["query"]["processInstanceId"])
+        self.assertNotIn("workflowInstanceId", client.calls[0]["query"])
 
 
 if __name__ == "__main__":
