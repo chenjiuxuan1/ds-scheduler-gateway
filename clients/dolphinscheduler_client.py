@@ -9,7 +9,7 @@ from datetime import datetime
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from gateway.models import CountryConfig
 from clients.schedule_alerts import (
@@ -85,7 +85,42 @@ class DolphinSchedulerClient:
         except Exception as exc:
             return False, {"error": repr(exc), "url": url}
 
+    def _resolve_project_code(self, payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        """Resolve the effective project_code for a request.
+
+        Priority: explicit project_code > resolve by project_name > country default.
+        A caller-supplied project_name that cannot be resolved returns an explicit
+        error instead of silently falling back to the country default project, so
+        a project specified by the caller is never shadowed by the default.
+        """
+        project_code = str(payload.get("project_code") or "").strip()
+        if project_code:
+            return project_code, None
+
+        project_name = str(payload.get("project_name") or "").strip()
+        if project_name:
+            ok, result = self.resolve_project({"project_name": project_name})
+            if not ok:
+                return None, result
+            resolved = str(result.get("project_code") or "").strip()
+            if not resolved:
+                return None, {
+                    "code": "PROJECT_RESOLVE_FAILED",
+                    "message": f"could not resolve project name: {project_name}",
+                }
+            return resolved, None
+
+        return str(self.config.project_code or "").strip() or None, None
+
     def list_workflows(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
         query = {
             "pageNo": payload.get("page_no", 1),
             "pageSize": payload.get("page_size", 20),
@@ -93,7 +128,7 @@ class DolphinSchedulerClient:
         }
         return self.request(
             "GET",
-            f"/projects/{payload.get('project_code') or self.config.project_code}/workflow-definition",
+            f"/projects/{project_code}/workflow-definition",
             query=query,
         )
 
@@ -289,7 +324,14 @@ class DolphinSchedulerClient:
         }
 
     def list_schedules(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
-        project_code = payload.get("project_code") or self.config.project_code
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
         query = {
             "pageNo": payload.get("page_no", 1),
             "pageSize": payload.get("page_size", 200),
@@ -333,7 +375,14 @@ class DolphinSchedulerClient:
         return True, wrapped
 
     def get_schedule(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
-        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
         schedule_id = str(payload.get("schedule_id") or "").strip()
         workflow_code = str(payload.get("workflow_code") or "").strip()
         workflow_name = str(payload.get("workflow_name") or "").strip()
@@ -1052,7 +1101,14 @@ class DolphinSchedulerClient:
         return self._finalize_schedule_release(payload, schedule_id, "OFFLINE", result)
 
     def schedule_blast_radius(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
-        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
         ok, workflow_result = self.get_workflow(payload)
         if not ok:
             return False, workflow_result
@@ -1087,7 +1143,14 @@ class DolphinSchedulerClient:
         }
 
     def get_workflow(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
-        project_code = payload.get("project_code") or self.config.project_code
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
         workflow_code = payload.get("workflow_code")
         if workflow_code:
             return self.request(
@@ -1107,6 +1170,14 @@ class DolphinSchedulerClient:
         return False, {"message": f"workflow not found by name: {workflow_name}"}
 
     def dump_workflow_graph(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
         ok, workflow_result = self.get_workflow(payload)
         if not ok:
             return False, workflow_result
@@ -1123,7 +1194,7 @@ class DolphinSchedulerClient:
         return True, {
             "workflow_summary": {
                 "name": workflow_meta.get("name"),
-                "project_code": str(payload.get("project_code") or self.config.project_code).strip(),
+                "project_code": project_code,
                 "workflow_code": str(payload.get("workflow_code") or workflow_meta.get("code") or "").strip(),
                 "release_state": workflow_meta.get("releaseState") or workflow_meta.get("scheduleReleaseState") or workflow_meta.get("release_state"),
                 "tenant_code": detail.get("tenantCode"),
@@ -1136,7 +1207,7 @@ class DolphinSchedulerClient:
             "location_count": len(locations),
         },
             "schedule_summary": self._resolve_schedule_summary(
-                project_code=str(payload.get("project_code") or self.config.project_code).strip(),
+                project_code=project_code,
                 workflow_detail=detail,
             ),
             "task_definitions": task_definitions,
@@ -1365,7 +1436,14 @@ class DolphinSchedulerClient:
         return False, {"message": "all trigger attempts failed", "attempts": attempts}
 
     def list_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
-        project_code = payload.get("project_code") or self.config.project_code
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
         query = {
             "pageNo": payload.get("page_no", 1),
             "pageSize": payload.get("page_size", 20),
@@ -1392,7 +1470,14 @@ class DolphinSchedulerClient:
         - consecutive_failures: int (optional, default 3, threshold for stuck)
         - page_size: int (optional, default 20, instances to fetch per workflow)
         """
-        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
         consecutive_threshold = int(payload.get("consecutive_failures", 3))
         page_size = int(payload.get("page_size", 20))
         filter_workflow_codes = payload.get("workflow_codes", [])
@@ -1752,14 +1837,16 @@ class DolphinSchedulerClient:
                     return line[:500]
         return ""
     def list_task_instances(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
-        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {"message": "project_code or project_name is required"}
         process_instance_id = self._safe_int(
             payload.get("process_instance_id")
             or payload.get("instance_id")
             or payload.get("workflow_instance_id")
         )
-        if not project_code:
-            return False, {"message": "project_code is required"}
         if process_instance_id <= 0:
             return False, {
                 "message": "list_task_instances requires workflow/process instance id",
@@ -1819,9 +1906,11 @@ class DolphinSchedulerClient:
         return True, normalized_result
 
     def get_task_log(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
-        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
         if not project_code:
-            return False, {"message": "project_code is required"}
+            return False, {"message": "project_code or project_name is required"}
 
         # A SUB_WORKFLOW task is only a control wrapper and normally has no SQL
         # failure log of its own.  Reuse the existing read-only action contract
@@ -1934,12 +2023,14 @@ class DolphinSchedulerClient:
         not the task definition code.  Keeping this as a separate read-only action
         lets callers recurse only when they actually encounter a sub-workflow task.
         """
-        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {"message": "project_code or project_name is required"}
         task_instance_id = self._safe_int(
             payload.get("task_instance_id") or payload.get("task_id")
         )
-        if not project_code:
-            return False, {"message": "project_code is required"}
         if task_instance_id <= 0:
             return False, {
                 "message": "get_sub_workflow_instance requires task_instance_id",
@@ -1976,7 +2067,14 @@ class DolphinSchedulerClient:
         }
 
     def get_instance(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
-        project_code = payload.get("project_code") or self.config.project_code
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
         instance_id = payload.get("instance_id")
         return self.request(
             "GET",
@@ -2337,6 +2435,11 @@ class DolphinSchedulerClient:
         }
 
     def _resolve_task_instance(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {"message": "project_code or project_name is required"}
         process_instance_id = self._safe_int(
             payload.get("process_instance_id")
             or payload.get("instance_id")
@@ -2355,7 +2458,7 @@ class DolphinSchedulerClient:
 
         ok, result = self.list_task_instances(
             {
-                "project_code": payload.get("project_code") or self.config.project_code,
+                "project_code": project_code,
                 "instance_id": process_instance_id,
                 "page_no": 1,
                 "page_size": max(self._safe_int(payload.get("page_size")), 100) or 100,
@@ -2436,7 +2539,11 @@ class DolphinSchedulerClient:
         return "<!doctype html" in probe or "<html" in probe
 
     def extract_task_runtime_config(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
-        project_code = str(payload.get("project_code") or self.config.project_code).strip()
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {"message": "project_code or project_name is required"}
         workflow_code = str(payload.get("workflow_code") or "").strip()
         task_name = str(payload.get("task_name") or "").strip()
         task_code = self._safe_int(payload.get("task_code"))
