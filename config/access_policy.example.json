@@ -1,0 +1,27 @@
+{
+  "_comment": "DS 调度网关访问控制策略。由值班平台「DS网关使用统计 → 用户权限与管控」生成并下发到各国机器 /root/ds-scheduler-gateway/config/access_policy.json。手动编辑时请保留结构。",
+  "version": 1,
+  "enforce": false,
+  "generatedAt": "",
+  "defaultRole": "operator",
+  "enforceUnknown": true,
+  "globalLimits": {
+    "maxActionsPerHour": 200,
+    "maxActionsPerDay": 500,
+    "maxCreatesPerHour": 10,
+    "maxCreatesPerDay": 30,
+    "maxDeletesPerDay": 20,
+    "maxTriggersPerHour": 30
+  },
+  "tokens": {
+    "289e723fd059f1ea95ef0bb377eb1a95": {
+      "user": "jiangchuanchen",
+      "role": "admin",
+      "enabled": true,
+      "allowedActions": null,
+      "deniedActions": [],
+      "deleteAllowed": true,
+      "limits": {}
+    }
+  }
+}

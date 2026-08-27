@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from gateway.access import AccessController
 from gateway.models import GatewayRequest
 from gateway.response import build_response
 from gateway.router import route_request
@@ -9,6 +10,22 @@ from gateway.utils import load_countries_config, validate_request
 def execute_request(request: GatewayRequest):
     countries = load_countries_config()
     validate_request(request, countries)
+
+    # Access control: enforce user permissions / quotas before routing.
+    access_decision = AccessController().authorize(request.ds_token, request.action)
+    if not access_decision.get("allowed"):
+        return build_response(
+            False,
+            request.country,
+            request.action,
+            request.request_id,
+            data=None,
+            error={
+                "code": access_decision.get("code") or "ACCESS_DENIED",
+                "message": access_decision.get("message") or "access denied",
+                "access": access_decision.get("detail"),
+            },
+        )
 
     ok, result = route_request(request, countries[request.country])
     if ok:

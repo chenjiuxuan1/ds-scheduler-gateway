@@ -152,6 +152,26 @@
   个别环境可能仍返回旧的 `task_params.rawScript / sql` 视图。
 - 如需做变更后的强校验，当前优先使用 `get_workflow` 或 `dump_workflow_graph` 回读任务定义。
 
+## 访问控制（用户权限与极端情况管控）
+
+网关内置轻量访问控制：每次请求在执行前先做权限与限额校验，命中即拒绝，防止
+**大量新建/删除**、**未授权删除**等违规操作。
+
+- 校验模块：`gateway/access.py`（仅标准库）。
+- 策略文件：`config/access_policy.json`（由值班平台「DS网关使用统计 → 用户权限与管控」生成并下发；
+  示例见 `config/access_policy.example.json`；该文件与状态文件 `config/access_state.json` 已加入
+  `.gitignore`，`git clean -fd` 不会误删）。
+- 判定优先级：用户被禁用 → 动作黑名单 → 动作白名单 → 角色/删除开关 → 限额（小时/日滚动计数）。
+- 兜底：环境变量 `DS_ACCESS_DISABLE=1` 可紧急放行；策略 `enforce: false` 只保存不拦截。
+
+动作分类与角色默认权限、限额定义见 `gateway/access.py`，与值班平台 `src/ds-scheduler-access.mjs` 保持一致。
+下发与部署流程见值班平台仓库文档 `docs/ds-scheduler-access-control.md`。
+
+```bash
+# 网关侧测试
+python3 -m unittest tests.test_access -v
+```
+
 ## 目录结构
 
 ```text

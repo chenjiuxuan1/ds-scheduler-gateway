@@ -5,3 +5,6 @@ __pycache__/
 .env.local
 config/countries.local.json
 .worktrees/
+# 运行时生成的访问控制策略与用量状态（由值班平台下发/更新）
+config/access_policy.json
+config/access_state.json
