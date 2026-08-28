@@ -190,6 +190,213 @@ class DolphinSchedulerClient:
             "create_result": create_result,
         }
 
+    def copy_workflow(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        """Create a trigger-style copy of an existing workflow in the same project.
+
+        The copy preserves the source workflow's task definitions, task relations,
+        locations, global params, tenant and execution type, but assigns brand-new
+        task / relation codes and does NOT create any schedule, so the copy only
+        runs when explicitly triggered via ``trigger_workflow``.
+
+        Required:
+        - ``project_code`` or ``project_name`` (source project)
+        - ``workflow_code`` (source workflow)
+        - ``workflow_name`` (new workflow name, must be unique in the project)
+        """
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
+
+        source_workflow_code = str(payload.get("workflow_code") or "").strip()
+        new_workflow_name = str(payload.get("workflow_name") or "").strip()
+        if not source_workflow_code:
+            return False, {
+                "code": "SOURCE_WORKFLOW_CODE_REQUIRED",
+                "message": "copy_workflow requires workflow_code (source workflow)",
+            }
+        if not new_workflow_name:
+            return False, {
+                "code": "WORKFLOW_NAME_REQUIRED",
+                "message": "copy_workflow requires workflow_name (new workflow name)",
+            }
+
+        ok, source_result = self.get_workflow(
+            {"project_code": project_code, "workflow_code": source_workflow_code}
+        )
+        if not ok:
+            return False, source_result
+
+        detail = self._unwrap_workflow_detail(source_result)
+        if not detail:
+            return False, {
+                "message": "source workflow detail payload is empty",
+                "raw": source_result,
+            }
+
+        workflow_meta = self._get_workflow_meta(detail)
+        task_definitions = self._get_workflow_task_definitions(detail)
+        task_relations = self._get_workflow_task_relations(detail)
+        locations = self._get_workflow_locations(detail)
+        global_params = self._normalize_json_value(
+            workflow_meta.get("globalParams"),
+            workflow_meta.get("globalParamList"),
+            detail.get("globalParams"),
+            detail.get("globalParamList"),
+            default=[],
+        )
+        tenant_code = (
+            payload.get("tenant_code")
+            or workflow_meta.get("tenantCode")
+            or detail.get("tenantCode")
+            or self.config.tenant_code
+            or "default"
+        )
+        execution_type = (
+            payload.get("execution_type")
+            or workflow_meta.get("executionType")
+            or "PARALLEL"
+        )
+        timeout = payload.get("timeout")
+        if timeout in ("", None):
+            timeout = workflow_meta.get("timeout") or 0
+        description = (
+            payload.get("description")
+            if payload.get("description") is not None
+            else (
+                workflow_meta.get("description")
+                if workflow_meta.get("description") is not None
+                else detail.get("description", "")
+            )
+        )
+
+        # Remap every task code so the copy gets fresh unique codes.
+        old_to_new: Dict[int, int] = {}
+        new_task_definitions: list[Dict[str, Any]] = []
+        used_codes: list[int] = []
+        for task in task_definitions:
+            old_code = self._safe_int(task.get("code"))
+            new_code = self._next_code(used_codes)
+            used_codes.append(new_code)
+            old_to_new[old_code] = new_code
+            cloned = deepcopy(task)
+            cloned["code"] = new_code
+            cloned["version"] = 1
+            if str(cloned.get("projectCode") or "").strip() not in ("", "0"):
+                cloned["projectCode"] = self._safe_int(project_code)
+            new_task_definitions.append(cloned)
+
+        # Remap relation codes and the task codes they reference.
+        new_task_relations: list[Dict[str, Any]] = []
+        for relation in task_relations:
+            cloned = deepcopy(relation)
+            relation_code = self._next_code(used_codes)
+            used_codes.append(relation_code)
+            cloned["code"] = relation_code
+            cloned["processDefinitionCode"] = 0
+            cloned["processDefinitionVersion"] = 1
+            pre_code = self._safe_int(cloned.get("preTaskCode"))
+            post_code = self._safe_int(cloned.get("postTaskCode"))
+            if pre_code in old_to_new:
+                cloned["preTaskCode"] = old_to_new[pre_code]
+            if post_code in old_to_new:
+                cloned["postTaskCode"] = old_to_new[post_code]
+            if str(cloned.get("preTaskVersion") or "").strip() not in ("", "0"):
+                cloned["preTaskVersion"] = 1
+            if str(cloned.get("postTaskVersion") or "").strip() not in ("", "0"):
+                cloned["postTaskVersion"] = 1
+            new_task_relations.append(cloned)
+
+        # Remap location task codes.
+        new_locations: list[Dict[str, Any]] = []
+        for location in locations:
+            cloned = deepcopy(location)
+            loc_task_code = self._safe_int(cloned.get("taskCode"))
+            if loc_task_code in old_to_new:
+                cloned["taskCode"] = old_to_new[loc_task_code]
+            new_locations.append(cloned)
+
+        form: Dict[str, Any] = {
+            "name": new_workflow_name,
+            "description": description,
+            "globalParams": json.dumps(global_params, ensure_ascii=False),
+            "locations": json.dumps(new_locations, ensure_ascii=False),
+            "timeout": timeout,
+            "tenantCode": tenant_code,
+            "taskRelationJson": json.dumps(new_task_relations, ensure_ascii=False),
+            "taskDefinitionJson": json.dumps(new_task_definitions, ensure_ascii=False),
+            "executionType": execution_type,
+        }
+
+        ok, create_result, create_attempt = self._create_workflow_definition(
+            project_code,
+            {"workflow_name": new_workflow_name},
+            forms_override=[("workflow_copy_full", form)],
+        )
+        if not ok:
+            return False, create_result
+        new_workflow_code = self._extract_workflow_code(create_result)
+        if not new_workflow_code:
+            lookup_ok, lookup_result = self.get_workflow(
+                {
+                    "project_code": project_code,
+                    "workflow_name": new_workflow_name,
+                    "search_val": new_workflow_name,
+                    "page_no": 1,
+                    "page_size": 100,
+                }
+            )
+            if lookup_ok and isinstance(lookup_result, dict):
+                new_workflow_code = str(
+                    lookup_result.get("code")
+                    or lookup_result.get("workflowDefinitionCode")
+                    or lookup_result.get("processDefinitionCode")
+                    or ""
+                ).strip()
+
+        response_payload: Dict[str, Any] = {
+            "project_code": project_code,
+            "source_workflow_code": source_workflow_code,
+            "source_workflow_name": str(
+                workflow_meta.get("name") or detail.get("name") or ""
+            ).strip(),
+            "workflow_name": new_workflow_name,
+            "workflow_code": new_workflow_code,
+            "description": description,
+            "tenant_code": tenant_code,
+            "execution_type": execution_type,
+            "timeout": timeout,
+            "global_params": global_params,
+            "task_definition_count": len(new_task_definitions),
+            "task_relation_count": len(new_task_relations),
+            "location_count": len(new_locations),
+            "trigger_style": True,
+            "schedule_created": False,
+            "release_state": "OFFLINE",
+            "create_attempt": create_attempt,
+            "create_result": create_result,
+        }
+
+        if bool(payload.get("release_workflow", True)):
+            release_ok, release_result = self.release_workflow(
+                {
+                    "project_code": project_code,
+                    "workflow_code": new_workflow_code,
+                },
+                "ONLINE",
+            )
+            response_payload["release_workflow"] = True
+            response_payload["release_state"] = "ONLINE" if release_ok else "ONLINE_ATTEMPT_FAILED"
+            response_payload["release_result"] = release_result if not release_ok else None
+        else:
+            response_payload["release_workflow"] = False
+
+        return True, response_payload
+
     def list_projects(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         query = {
             "pageNo": payload.get("page_no", 1),
@@ -3450,6 +3657,7 @@ class DolphinSchedulerClient:
         self,
         project_code: str,
         payload: Dict[str, Any],
+        forms_override: list[tuple[str, Dict[str, Any]]] | None = None,
     ) -> Tuple[bool, Any, Dict[str, Any]]:
         paths = [
             f"/projects/{project_code}/process-definition",
@@ -3457,7 +3665,7 @@ class DolphinSchedulerClient:
             f"/projects/{project_code}/workflow-definition",
             f"/projects/{project_code}/workflow-definitions",
         ]
-        forms = self._build_workflow_create_forms(payload)
+        forms = forms_override if forms_override is not None else self._build_workflow_create_forms(payload)
         attempts = []
         for path in paths:
             for form_label, form in forms:

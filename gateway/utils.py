@@ -16,6 +16,7 @@ SUPPORTED_ACTIONS = {
     "list_alert_groups",
     "list_workflows",
     "create_workflow",
+    "copy_workflow",
     "list_schedules",
     "get_schedule",
     "create_schedule",

@@ -19,6 +19,7 @@
 - `list_alert_groups`
 - `list_workflows`
 - `create_workflow`
+- `copy_workflow`
 - `list_schedules`
 - `get_schedule`
 - `create_schedule`
@@ -414,6 +415,37 @@ ssh -p 36000 root@<pk-host> "cd /root/ds-scheduler-gateway && python3 scripts/ds
 ```json
 {"project_code":"19427088052704","workflow_code":"174599383687393","task_name":"测试2","sql":"select 2","template_task_name":"dwd_okr_dashboard"}
 ```
+
+## 复制工作流（触发式）
+
+`copy_workflow` 用于把已有工作流复制成**触发式（按需）版本**，适合把「固定 5 分钟轮询」改造成「DS API 按需触发」：新副本完整保留源工作流的任务节点、依赖关系、坐标、全局参数和运行配置，但**不创建任何定时**，且默认直接上线（可触发）。
+
+推荐 payload：
+
+```json
+{
+  "project_code": "15843450427744",
+  "workflow_code": "15843450427744_原工作流code",
+  "workflow_name": "DWD_5M_TRIGGER",
+  "release_workflow": true
+}
+```
+
+说明：
+
+- `project_code` / `project_name`: 目标项目（默认取国家配置项目）
+- `workflow_code`: 源工作流 code，必填
+- `workflow_name`: 新工作流名称，必填，需在项目内唯一
+- `release_workflow`: 可选，默认 `true`，创建后立即上线（触发式工作流需 ONLINE 才能被 API 触发）
+- 副本会重新生成任务 / 关系 / 坐标 code，避免与源工作流冲突
+- `schedule_created` 恒为 `false`，`trigger_style` 恒为 `true`
+
+返回重点：
+
+- `source_workflow_code` / `source_workflow_name`
+- `workflow_name` / `workflow_code`（新副本）
+- `task_definition_count` / `task_relation_count` / `location_count`
+- `release_state`（`ONLINE` / `OFFLINE` / `ONLINE_ATTEMPT_FAILED`）
 
 ## 按白名单禁用任务
 

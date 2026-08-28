@@ -61,6 +61,7 @@ READ_ACTIONS = {
 
 WRITE_ACTIONS = {
     "create_workflow",
+    "copy_workflow",
     "create_schedule",
     "update_schedule",
     "batch_update_schedule_alerts",
