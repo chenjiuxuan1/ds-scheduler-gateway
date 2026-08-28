@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Set
 READ_ACTIONS = {
     "resolve_project",
     "list_alert_groups",
+    "get_alert_instance",
     "list_projects",
     "list_workflows",
     "get_workflow",

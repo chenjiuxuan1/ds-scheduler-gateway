@@ -14,6 +14,7 @@ SUPPORTED_ACTIONS = {
     "list_projects",
     "resolve_project",
     "list_alert_groups",
+    "get_alert_instance",
     "list_workflows",
     "create_workflow",
     "copy_workflow",

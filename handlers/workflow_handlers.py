@@ -10,6 +10,7 @@ def dispatch_action(client: DolphinSchedulerClient, action: str, payload: Dict[s
         "list_projects": lambda: client.list_projects(payload),
         "resolve_project": lambda: client.resolve_project(payload),
         "list_alert_groups": lambda: client.list_alert_groups(payload),
+        "get_alert_instance": lambda: client.get_alert_instance(payload),
         "list_workflows": lambda: client.list_workflows(payload),
         "create_workflow": lambda: client.create_workflow(payload),
         "copy_workflow": lambda: client.copy_workflow(payload),

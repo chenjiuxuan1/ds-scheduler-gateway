@@ -475,6 +475,46 @@ class DolphinSchedulerClient:
             }
         return True, matches[0]
 
+    def get_alert_instance(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        """Probe the alert plugin instance configuration (read-only).
+
+        DolphinScheduler 3.4 exposes alert instances through a few controller
+        endpoints; this action tries the common ones so callers can see what
+        type / target an alert group's instance points at (e.g. HTTP / Telegram
+        webhook URL) before deciding to change it.
+
+        Payload:
+        - instance_id: alert instance id (required)
+        """
+        instance_id = str(payload.get("instance_id") or "").strip()
+        if not instance_id:
+            return False, {
+                "code": "ALERT_INSTANCE_ID_REQUIRED",
+                "message": "get_alert_instance requires instance_id",
+            }
+        attempts = []
+        candidate_requests = [
+            ("GET", f"/alert-plugin-instances/{instance_id}", None),
+            ("GET", f"/alert-plugin-instance/{instance_id}", None),
+            ("GET", f"/alert-groups/{instance_id}", None),
+            ("GET", f"/alert/plugin-instances/{instance_id}", None),
+            ("GET", f"/alert-plugins/{instance_id}", None),
+        ]
+        for method, path, query in candidate_requests:
+            ok, result = self.request(method, path, query=query)
+            attempts.append({"method": method, "path": path, "result": result})
+            if ok and self._is_ds_success(result):
+                return True, {"found": True, "path": path, "data": result}
+            status = result.get("status") if isinstance(result, dict) else None
+            if status not in (404, 405, 500):
+                break
+        return False, {
+            "code": "ALERT_INSTANCE_LOOKUP_FAILED",
+            "message": "could not locate alert instance via any candidate endpoint",
+            "instance_id": instance_id,
+            "attempts": attempts,
+        }
+
     def resolve_project(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
         project_code = str(payload.get("project_code") or "").strip()
         project_name = str(
