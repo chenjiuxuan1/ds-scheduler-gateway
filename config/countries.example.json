@@ -116,7 +116,7 @@
     }
   },
   "th": {
-    "base_url": "http://192.168.20.236:12345/dolphinscheduler",
+    "base_url": "http://192.168.102.7:12345/dolphinscheduler",
     "project_code": "12649397192448",
     "tenant_code": "dolphinscheduler",
     "worker_group": "default",

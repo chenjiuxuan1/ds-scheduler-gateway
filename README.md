@@ -255,7 +255,7 @@ export DS_COUNTRIES_CONFIG=/root/ds-scheduler-gateway/config/countries.json
 - `mx`: `DS_BASE_URL=http://172.20.220.165:12345/dolphinscheduler`
 - `ph`: `DS_BASE_URL=http://127.0.0.1:12345/dolphinscheduler`
 - `pk`: `DS_BASE_URL=http://10.20.84.176:12345/dolphinscheduler`
-- `th`: `DS_BASE_URL=http://192.168.20.236:12345/dolphinscheduler`
+- `th`: `DS_BASE_URL=http://192.168.102.7:12345/dolphinscheduler`
 
 说明：
 
