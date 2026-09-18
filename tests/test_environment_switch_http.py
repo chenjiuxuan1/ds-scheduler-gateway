@@ -45,6 +45,9 @@ def workflow_detail(environment_code):
                     "name": "shell_task",
                     "taskType": "SHELL",
                     "environmentCode": environment_code,
+                    # task-level retry settings must survive an environment switch
+                    "failRetryTimes": 3,
+                    "failRetryInterval": 5,
                     "taskParams": {"rawScript": "echo ${dt}", "localParams": []},
                 }
             ],
@@ -184,6 +187,26 @@ class EnvironmentSwitchEndToEndTests(unittest.TestCase):
         self.assertEqual("12813621425120", str(tasks[0]["environmentCode"]))
         # The live global params were round-tripped verbatim, not rebuilt.
         self.assertEqual(GLOBAL_PARAMS, put_form["globalParams"])
+
+    def test_environment_switch_preserves_task_retry_settings(self):
+        """Switching environment must not touch task-level retry settings."""
+        result = self.run_entry(
+            "update_workflow_environment",
+            {
+                "project_code": PROJECT,
+                "workflow_code": WORKFLOW,
+                "environment_code": "12813621425120",
+                "dry_run": False,
+            },
+        )
+        self.assertTrue(result["success"], result)
+
+        put_form = StubDSHandler.requests[1]["form"]
+        task = json.loads(put_form["taskDefinitionJson"])[0]
+        self.assertEqual("12813621425120", str(task["environmentCode"]))
+        self.assertEqual(3, task["failRetryTimes"])
+        self.assertEqual(5, task["failRetryInterval"])
+        self.assertEqual("echo ${dt}", task["taskParams"]["rawScript"])
 
     def test_batch_dry_run_reports_without_writing(self):
         result = self.run_entry(
