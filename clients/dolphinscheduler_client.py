@@ -3675,6 +3675,1314 @@ class DolphinSchedulerClient:
             "restore_schedule_result": restore_schedule_result,
         }
 
+    # ------------------------------------------------------------------
+    # Environment switch (workflow definition round-trip)
+    #
+    # The structural mutation actions (append_task / update_task /
+    # delete_task / ...) rebuild the workflow definition form from the
+    # request payload, so the gateway refuses to run them when the live
+    # definition has lost its ``globalParams`` (see
+    # ``_detect_workflow_param_integrity_issue``). Switching the DS
+    # environment does not need to rebuild anything: the live definition is
+    # round-tripped verbatim and only ``environmentCode`` is rewritten, so an
+    # environment-only switch can never drop a workflow global param.
+    # ------------------------------------------------------------------
+
+    GLOBAL_PARAMS_PRIMARY_ORDER = (
+        ("workflowDefinition", "globalParams"),
+        ("detail", "globalParams"),
+        ("workflowDefinition", "globalParamList"),
+        ("detail", "globalParamList"),
+        ("workflowDefinition", "globalParamMap"),
+        ("detail", "globalParamMap"),
+    )
+
+    @staticmethod
+    def _parse_global_params_value(value: Any) -> Tuple[bool, list[Any]]:
+        """Parse a DS global-params value without ever silently emptying it.
+
+        Returns ``(ok, parsed)``. ``ok`` is ``False`` when the value is a
+        non-blank string that is not valid JSON, because writing such a value
+        back is what silently drops workflow global params.
+        """
+        if value in (None, ""):
+            return True, []
+        if isinstance(value, dict):
+            return True, [value]
+        if isinstance(value, (list, tuple)):
+            return True, list(value)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return False, []
+            if isinstance(parsed, dict):
+                return True, [parsed]
+            if isinstance(parsed, list):
+                return True, parsed
+            return True, []
+        return False, []
+
+    @staticmethod
+    def _parse_global_param_map(value: Any) -> Tuple[bool, Dict[str, Any]]:
+        """Parse a ``globalParamMap`` value without silently reading it as empty.
+
+        Returns ``(ok, mapping)``. ``ok`` is ``False`` for a non-blank string
+        that is not valid JSON, and for any value that is not an object, so an
+        unreadable map can never be mistaken for "this workflow has no global
+        params" (which is what would make the writeback drop them).
+        """
+        if value in (None, ""):
+            return True, {}
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return False, {}
+        if not isinstance(value, dict):
+            return False, {}
+        return True, value
+
+    @staticmethod
+    def _global_param_names_from_list(items: Iterable[Any]) -> set[str]:
+        names: set[str] = set()
+        if not isinstance(items, (list, tuple)):
+            return names
+        for item in items:
+            if isinstance(item, dict):
+                prop = str(item.get("prop") or item.get("name") or "").strip()
+            elif isinstance(item, str):
+                prop = item.strip()
+            else:
+                prop = ""
+            if prop:
+                names.add(prop)
+        return names
+
+    @staticmethod
+    def _global_param_names_from_map(value: Any) -> set[str]:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return set()
+        if not isinstance(value, dict):
+            return set()
+        return {str(key).strip() for key in value.keys() if str(key or "").strip()}
+
+    @staticmethod
+    def _global_params_list_from_map(value: Any) -> list[Dict[str, Any]]:
+        """Rebuild a param list from ``globalParamMap`` as a last resort.
+
+        Only used when neither ``globalParams`` nor ``globalParamList`` is
+        present. It preserves the declared parameter names, which is the part
+        that must never be lost; ``direct`` / ``type`` fall back to defaults.
+        """
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                value = {}
+        if not isinstance(value, dict):
+            return []
+        params: list[Dict[str, Any]] = []
+        for key, item in value.items():
+            prop = str(key or "").strip()
+            if not prop:
+                continue
+            if isinstance(item, dict):
+                params.append(
+                    {
+                        "prop": prop,
+                        "direct": str(item.get("direct") or "IN").strip() or "IN",
+                        "type": str(item.get("type") or "VARCHAR").strip() or "VARCHAR",
+                        "value": item.get("value", ""),
+                    }
+                )
+            else:
+                params.append(
+                    {
+                        "prop": prop,
+                        "direct": "IN",
+                        "type": "VARCHAR",
+                        "value": item if item is not None else "",
+                    }
+                )
+        return params
+
+    def _collect_workflow_global_params_snapshot(
+        self, workflow_detail: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Read the live workflow global params and prove they can be written back.
+
+        Returns a dict with ``verbatim`` (the exact value that will be written
+        back), ``names`` (every declared param name found anywhere in the
+        response) and either ``warnings`` or a blocking ``error``.
+
+        The blocking ``error`` is the anti-wipe guarantee: if the response
+        mentions a param name that the value we are about to write back does
+        not contain, the request is refused instead of dropping that param.
+        """
+        workflow_meta = self._get_workflow_meta(workflow_detail)
+        levels = {
+            "workflowDefinition": workflow_meta if isinstance(workflow_meta, dict) else {},
+            "detail": workflow_detail if isinstance(workflow_detail, dict) else {},
+        }
+
+        # ``_get_workflow_meta`` silently falls back to the whole detail object
+        # when ``workflowDefinition`` is not an object. In that shape we cannot
+        # tell an empty param list from an unread one, so refuse rather than
+        # write back a definition with the global params stripped.
+        raw_definition = (
+            workflow_detail.get("workflowDefinition")
+            if isinstance(workflow_detail, dict)
+            else None
+        )
+        if raw_definition is not None and not isinstance(raw_definition, dict):
+            return {
+                "verbatim": None,
+                "names": set(),
+                "source": "",
+                "warnings": [],
+                "error": {
+                    "code": "GLOBAL_PARAMS_UNREADABLE",
+                    "message": (
+                        "workflowDefinition was not returned as an object, so workflow "
+                        "global params cannot be read reliably; refusing to write the "
+                        "workflow definition back"
+                    ),
+                    "workflow_definition_type": type(raw_definition).__name__,
+                },
+            }
+
+        raw_by_source: Dict[str, Any] = {}
+        for level_name, source in levels.items():
+            for key in ("globalParams", "globalParamList", "globalParamMap"):
+                if key in source:
+                    raw_by_source[f"{level_name}.{key}"] = source.get(key)
+
+        names: set[str] = set()
+        list_source_names: set[str] = set()
+        unreadable: list[str] = []
+        for source_label, value in raw_by_source.items():
+            if source_label.endswith(".globalParamMap"):
+                map_ok, map_value = self._parse_global_param_map(value)
+                if not map_ok:
+                    unreadable.append(source_label)
+                    continue
+                names |= self._global_param_names_from_map(map_value)
+                continue
+            ok, parsed = self._parse_global_params_value(value)
+            if not ok:
+                unreadable.append(source_label)
+                continue
+            source_names = self._global_param_names_from_list(parsed)
+            names |= source_names
+            list_source_names |= source_names
+
+        if unreadable:
+            return {
+                "verbatim": None,
+                "names": names,
+                "source": "",
+                "warnings": [],
+                "error": {
+                    "code": "GLOBAL_PARAMS_UNREADABLE",
+                    "message": (
+                        "workflow global params could not be parsed; refusing to write the "
+                        "workflow definition back because the write could drop them"
+                    ),
+                    "unreadable_sources": unreadable,
+                },
+            }
+
+        warnings: list[str] = []
+        verbatim: Any = None
+        source_label = ""
+        for level_name, key in self.GLOBAL_PARAMS_PRIMARY_ORDER:
+            candidate_label = f"{level_name}.{key}"
+            if candidate_label not in raw_by_source:
+                continue
+            value = raw_by_source[candidate_label]
+            if key == "globalParamMap":
+                verbatim = self._global_params_list_from_map(value)
+                warnings.append("GLOBAL_PARAMS_FROM_MAP_FALLBACK")
+            else:
+                verbatim = value if isinstance(value, str) else self._parse_global_params_value(value)[1]
+            source_label = candidate_label
+            break
+
+        if verbatim is None:
+            verbatim = []
+            source_label = "default_empty"
+            if not raw_by_source:
+                # No global-params field at all: the writeback is faithful only
+                # if the definition genuinely has none. Say so instead of
+                # silently claiming an empty list was read.
+                warnings.append("GLOBAL_PARAMS_ABSENT_ASSUMED_EMPTY")
+
+        if isinstance(verbatim, str):
+            _ok, verbatim_names = self._parse_global_params_value(verbatim)
+            verbatim_names = self._global_param_names_from_list(verbatim_names)
+        elif isinstance(verbatim, dict):
+            verbatim_names = self._global_param_names_from_map(verbatim)
+        else:
+            verbatim_names = self._global_param_names_from_list(verbatim)
+
+        missing_from_value = list_source_names - verbatim_names
+        if missing_from_value:
+            return {
+                "verbatim": None,
+                "names": names,
+                "source": source_label,
+                "warnings": warnings,
+                "error": {
+                    "code": "GLOBAL_PARAMS_UNREADABLE",
+                    "message": (
+                        "workflow global params read back inconsistently; refusing to write "
+                        "the workflow definition back because the write would drop params"
+                    ),
+                    "source": source_label,
+                    "params_missing_from_writeback": sorted(missing_from_value),
+                },
+            }
+
+        map_only_missing = names - verbatim_names - list_source_names
+        if map_only_missing:
+            warnings.append("GLOBAL_PARAMS_MAP_EXTRA_NAMES")
+
+        return {
+            "verbatim": verbatim,
+            # Names that exist somewhere in the read, for reporting.
+            "names": names,
+            # Names the writeback value actually carries. Verification must use
+            # THIS, not ``names``: map-only names are deliberately not written
+            # back (they are only a fallback source), so expecting them would
+            # fail verification on a switch that in fact succeeded.
+            "writeback_names": verbatim_names,
+            "map_only_names": sorted(map_only_missing),
+            "source": source_label,
+            "warnings": warnings,
+            "raw": raw_by_source,
+            "error": None,
+        }
+
+    @staticmethod
+    def _normalize_environment_code_value(value: Any) -> Any:
+        text = str(value if value is not None else "").strip()
+        if re.fullmatch(r"-?\d+", text):
+            try:
+                return int(text)
+            except ValueError:
+                return text
+        return text
+
+    @staticmethod
+    def _resolve_bool_field(
+        payload: Dict[str, Any],
+        key: str,
+        default: bool,
+    ) -> Tuple[bool, bool, Optional[Dict[str, Any]]]:
+        if key not in payload or payload.get(key) in (None, ""):
+            return True, default, None
+        value = payload.get(key)
+        if not isinstance(value, bool):
+            return False, default, {
+                "code": "INVALID_BOOLEAN_FIELD",
+                "message": f"{key} must be a boolean",
+                "field": key,
+            }
+        return True, value, None
+
+    def update_workflow_environment(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        """Switch the DS environment (``environmentCode``) of a single workflow.
+
+        Only ``environmentCode`` changes. ``globalParams``, task relations,
+        locations, coordinates, cron window and every other workflow attribute
+        are read from the live definition and written back untouched, so this
+        action is safe even when the workflow has already lost its
+        ``globalParams`` (the case the structural actions must refuse).
+
+        Payload:
+        - ``project_code`` / ``project_name``: target project
+        - ``workflow_code``: required
+        - ``environment_code``: required, the environment to switch to
+        - ``dry_run``: default ``true``; pass ``false`` to actually write
+        - ``include_schedule``: default ``false``; also switch the schedule's
+          ``environmentCode`` (never touches cron / window / alerts)
+        - ``restore_original_state`` / ``auto_offline``: default ``true``
+        - ``require_global_params``: default ``false``; when ``true`` the
+          pre-existing missing-globalParams state blocks the switch instead of
+          only raising a warning
+        """
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
+        workflow_code = str(payload.get("workflow_code") or "").strip()
+        if not workflow_code:
+            return False, {
+                "code": "WORKFLOW_CODE_REQUIRED",
+                "message": "workflow_code is required",
+            }
+        target_environment_code = str(payload.get("environment_code") or "").strip()
+        if not target_environment_code:
+            return False, {
+                "code": "ENVIRONMENT_CODE_REQUIRED",
+                "message": "environment_code is required",
+            }
+
+        flags: Dict[str, bool] = {}
+        for field, default in (
+            ("dry_run", True),
+            ("include_schedule", False),
+            ("restore_original_state", True),
+            ("auto_offline", True),
+            ("require_global_params", False),
+        ):
+            valid, value, error = self._resolve_bool_field(payload, field, default)
+            if not valid:
+                return False, error
+            flags[field] = value
+
+        ok, workflow_result = self.request(
+            "GET",
+            f"/projects/{project_code}/workflow-definition/{workflow_code}",
+        )
+        if not ok:
+            return False, workflow_result
+        detail = self._unwrap_workflow_detail(workflow_result)
+        if not detail:
+            return False, {
+                "message": "workflow detail payload is empty",
+                "raw": workflow_result,
+            }
+
+        return self._switch_workflow_environment(
+            project_code=project_code,
+            workflow_code=workflow_code,
+            detail=detail,
+            target_environment_code=target_environment_code,
+            dry_run=flags["dry_run"],
+            include_schedule=flags["include_schedule"],
+            restore_original_state=flags["restore_original_state"],
+            auto_offline=flags["auto_offline"],
+            require_global_params=flags["require_global_params"],
+        )
+
+    def _switch_workflow_environment(
+        self,
+        *,
+        project_code: str,
+        workflow_code: str,
+        detail: Dict[str, Any],
+        target_environment_code: str,
+        dry_run: bool,
+        include_schedule: bool,
+        restore_original_state: bool,
+        auto_offline: bool,
+        require_global_params: bool,
+    ) -> Tuple[bool, Any]:
+        workflow_meta = self._get_workflow_meta(detail)
+        task_definitions = self._get_workflow_task_definitions(detail)
+        task_relations = self._get_workflow_task_relations(detail)
+        locations = self._get_workflow_locations(detail)
+
+        if not task_definitions:
+            return False, {
+                "code": "WORKFLOW_HAS_NO_TASKS",
+                "message": "workflow has no task definitions, nothing to switch",
+                "project_code": project_code,
+                "workflow_code": workflow_code,
+            }
+
+        snapshot = self._collect_workflow_global_params_snapshot(detail)
+        if snapshot.get("error"):
+            error = dict(snapshot["error"])
+            error["project_code"] = project_code
+            error["workflow_code"] = workflow_code
+            return False, error
+
+        warnings = list(snapshot.get("warnings") or [])
+        integrity_issue = self._detect_workflow_param_integrity_issue(detail, task_definitions)
+        if integrity_issue:
+            if require_global_params:
+                return False, {
+                    **integrity_issue,
+                    "code": "GLOBAL_PARAMS_REQUIRED",
+                    "project_code": project_code,
+                    "workflow_code": workflow_code,
+                }
+            # The definition is already missing those params; the environment
+            # switch round-trips them verbatim, so it neither hides nor
+            # worsens the pre-existing state.
+            warnings.append("PRE_EXISTING_MISSING_GLOBAL_PARAMS")
+
+        target_value = self._normalize_environment_code_value(target_environment_code)
+        target_compare = str(target_environment_code).strip()
+
+        updated_task_definitions: list[Dict[str, Any]] = []
+        changed_tasks: list[Dict[str, Any]] = []
+        environment_codes_before: list[str] = []
+        for task in task_definitions:
+            cloned = deepcopy(task)
+            before_value = cloned.get("environmentCode")
+            before_text = str(before_value if before_value is not None else "").strip()
+            if before_text not in environment_codes_before:
+                environment_codes_before.append(before_text)
+            if before_text != target_compare:
+                changed_tasks.append(
+                    {
+                        "task_name": str(cloned.get("name") or "").strip(),
+                        "task_code": self._safe_int(cloned.get("code")),
+                        "environment_code_before": before_value,
+                        "environment_code_after": target_value,
+                    }
+                )
+            cloned["environmentCode"] = target_value
+            updated_task_definitions.append(cloned)
+
+        environment_codes_before_distinct = [
+            value for value in environment_codes_before if value != ""
+        ]
+        # Some tasks may have no environmentCode at all. A single-value rollback
+        # payload would then silently assign them a code they never had, so it is
+        # only offered when every task carried one and they all agreed.
+        has_environment_less_task = "" in environment_codes_before
+        single_before = (
+            environment_codes_before_distinct[0]
+            if len(environment_codes_before_distinct) == 1 and not has_environment_less_task
+            else ""
+        )
+        original_release_state = str(workflow_meta.get("releaseState") or "").upper()
+        schedule_summary = self._resolve_schedule_summary(
+            project_code=project_code,
+            workflow_detail=detail,
+        )
+        original_schedule_release_state = str(schedule_summary.get("release_state") or "").upper()
+        original_schedule_id = str(schedule_summary.get("schedule_id") or "").strip()
+        was_online = original_release_state == "ONLINE"
+        was_schedule_online = original_schedule_release_state == "ONLINE"
+
+        base_result: Dict[str, Any] = {
+            "project_code": project_code,
+            "workflow_code": workflow_code,
+            "workflow_name": str(workflow_meta.get("name") or detail.get("name") or "").strip(),
+            "environment_code": target_environment_code,
+            "environment_code_before_values": environment_codes_before_distinct,
+            "changed_task_count": len(changed_tasks),
+            "changed_tasks": changed_tasks,
+            "task_definition_count": len(updated_task_definitions),
+            "global_params_preserved": sorted(snapshot.get("writeback_names") or []),
+            "global_params_map_only": list(snapshot.get("map_only_names") or []),
+            "global_params_source": snapshot.get("source"),
+            "warnings": warnings,
+            "integrity_warning": integrity_issue,
+            "original_release_state": original_release_state,
+            "original_schedule_release_state": original_schedule_release_state,
+            "schedule_id": original_schedule_id,
+            "rollback_payload": {
+                "country": self.config.country,
+                "project_code": project_code,
+                "workflow_code": workflow_code,
+                "environment_code": single_before,
+                "environment_code_before_values": environment_codes_before_distinct,
+                "include_schedule": include_schedule,
+                "dry_run": False,
+                "restorable": bool(single_before),
+                "note": (
+                    "call update_workflow_environment with this payload (dry_run=false) to "
+                    "restore the previous environment"
+                    if single_before
+                    else (
+                        "tasks did not share a single previous environment code "
+                        "(see environment_code_before_values; some tasks may have had none); "
+                        "a single-environment rollback payload cannot be built safely, "
+                        "restore per task from the workflow definition log instead"
+                    )
+                ),
+            },
+        }
+
+        if dry_run:
+            schedule_result = self._switch_schedule_environment(
+                project_code=project_code,
+                workflow_code=workflow_code,
+                schedule_id=original_schedule_id,
+                target_environment_code=target_compare,
+                dry_run=True,
+                enabled=include_schedule,
+            )
+            if schedule_result.get("warning"):
+                base_result["warnings"] = [*base_result["warnings"], schedule_result["warning"]]
+            would_change = bool(changed_tasks) or bool(schedule_result.get("would_change"))
+            return True, {
+                **base_result,
+                "status": "DRY_RUN_MATCHED" if would_change else "SKIPPED_ALREADY_MATCHED",
+                "dry_run": True,
+                "applied": False,
+                "would_change": would_change,
+                "schedule": schedule_result,
+                "schedule_failed": self._schedule_write_failed(schedule_result),
+            }
+
+        if not changed_tasks:
+            # Nothing to rewrite on the workflow definition. Do not re-submit it:
+            # a no-op PUT would bump the definition version for no reason.
+            schedule_enabled = include_schedule
+            schedule_result = self._switch_schedule_environment(
+                project_code=project_code,
+                workflow_code=workflow_code,
+                schedule_id=original_schedule_id,
+                target_environment_code=target_compare,
+                dry_run=not schedule_enabled,
+                enabled=schedule_enabled,
+            )
+            if schedule_result.get("warning"):
+                base_result["warnings"] = [*base_result["warnings"], schedule_result["warning"]]
+            # The workflow needs no change, but a requested schedule switch can
+            # still fail; surface it instead of letting "skipped" hide it.
+            schedule_failed = self._schedule_write_failed(schedule_result)
+            if schedule_failed:
+                base_result["warnings"] = [
+                    *base_result["warnings"],
+                    "SCHEDULE_ENVIRONMENT_FAILED",
+                ]
+            return True, {
+                **base_result,
+                "status": "SKIPPED_ALREADY_MATCHED",
+                "dry_run": False,
+                "applied": False,
+                "schedule": schedule_result,
+                "schedule_failed": schedule_failed,
+                "restored_original_state": False,
+                "restored_original_schedule_state": False,
+            }
+
+        offline_result = None
+        if was_online and auto_offline:
+            offline_ok, offline_result = self.release_workflow(
+                {"project_code": project_code, "workflow_code": workflow_code},
+                "OFFLINE",
+            )
+            if not offline_ok or not self._is_ds_success(offline_result):
+                return False, {
+                    "code": "OFFLINE_BEFORE_UPDATE_FAILED",
+                    "message": "failed to offline workflow before switching its environment",
+                    "project_code": project_code,
+                    "workflow_code": workflow_code,
+                    "detail": offline_result,
+                }
+
+        update_form = self._build_workflow_update_form(
+            workflow_detail=detail,
+            payload={},
+            task_definitions=updated_task_definitions,
+            task_relations=task_relations,
+            locations=locations,
+            global_params_verbatim=snapshot.get("verbatim"),
+        )
+        update_ok, update_result = self._update_workflow_definition(
+            project_code, workflow_code, update_form
+        )
+        write_accepted = bool(update_ok) and self._is_ds_success(update_result)
+
+        status = "FAILED_UNCHANGED"
+        verification: Dict[str, Any] = {"verified": False, "read_ok": False, "mismatches": []}
+        rollback: Optional[Dict[str, Any]] = None
+        update_error: Optional[Dict[str, Any]] = None
+
+        if write_accepted:
+            verification = self._verify_workflow_environment(
+                project_code=project_code,
+                workflow_code=workflow_code,
+                expected_task_definitions=updated_task_definitions,
+                expected_global_param_names=set(snapshot.get("writeback_names") or set()),
+            )
+            if verification.get("verified"):
+                status = "UPDATED"
+            else:
+                status = "VERIFICATION_FAILED_ROLLED_BACK"
+                rollback = self._restore_workflow_environment(
+                    project_code=project_code,
+                    workflow_code=workflow_code,
+                    original_detail=detail,
+                    original_task_definitions=task_definitions,
+                    original_task_relations=task_relations,
+                    original_locations=locations,
+                    original_global_params_verbatim=snapshot.get("verbatim"),
+                    expected_global_param_names=set(snapshot.get("writeback_names") or set()),
+                )
+                if not rollback.get("verified"):
+                    status = "FAILED_ROLLBACK_FAILED"
+        else:
+            update_error = {
+                "code": "WORKFLOW_UPDATE_FAILED",
+                "message": "workflow environment update was not accepted by dolphinscheduler",
+                "detail": update_result,
+                "update_ok": bool(update_ok),
+            }
+
+        schedule_enabled = include_schedule and status == "UPDATED"
+        schedule_result = self._switch_schedule_environment(
+            project_code=project_code,
+            workflow_code=workflow_code,
+            schedule_id=original_schedule_id,
+            target_environment_code=target_compare,
+            dry_run=not schedule_enabled,
+            enabled=schedule_enabled,
+        )
+        if schedule_result.get("warning"):
+            base_result["warnings"] = [*base_result["warnings"], schedule_result["warning"]]
+        schedule_failed = self._schedule_write_failed(schedule_result)
+        if schedule_failed:
+            base_result["warnings"] = [
+                *base_result["warnings"],
+                "SCHEDULE_ENVIRONMENT_FAILED",
+            ]
+
+        restore_result = None
+        restored_original_state = False
+        if was_online and auto_offline and restore_original_state:
+            restore_ok, restore_result = self.release_workflow(
+                {"project_code": project_code, "workflow_code": workflow_code},
+                "ONLINE",
+            )
+            restored_original_state = bool(restore_ok) and self._is_ds_success(restore_result)
+            if not restored_original_state:
+                base_result["warnings"] = [
+                    *base_result["warnings"],
+                    "RESTORE_ONLINE_FAILED",
+                ]
+
+        restored_original_schedule_state = False
+        restore_schedule_result = None
+        if (
+            was_schedule_online
+            and restore_original_state
+            and original_schedule_id
+        ):
+            restore_schedule_ok, restore_schedule_result = self.release_schedule(
+                {"project_code": project_code},
+                original_schedule_id,
+                "ONLINE",
+            )
+            restored_original_schedule_state = bool(restore_schedule_ok) and self._is_ds_success(
+                restore_schedule_result
+            )
+            if not restored_original_schedule_state:
+                base_result["warnings"] = [
+                    *base_result["warnings"],
+                    "RESTORE_SCHEDULE_ONLINE_FAILED",
+                ]
+
+        result: Dict[str, Any] = {
+            **base_result,
+            "status": status,
+            "dry_run": False,
+            "applied": status == "UPDATED",
+            "offline_result": offline_result,
+            "update_result": update_result,
+            "update_error": update_error,
+            "verification": verification,
+            "rollback": rollback,
+            "schedule": schedule_result,
+            "schedule_failed": schedule_failed,
+            "restored_original_state": restored_original_state,
+            "restored_original_schedule_state": restored_original_schedule_state,
+            "restore_result": restore_result,
+            "restore_schedule_result": restore_schedule_result,
+        }
+        return status == "UPDATED", result
+
+    def _verify_workflow_environment(
+        self,
+        *,
+        project_code: str,
+        workflow_code: str,
+        expected_task_definitions: list[Dict[str, Any]],
+        expected_global_param_names: set[str],
+    ) -> Dict[str, Any]:
+        ok, result = self.request(
+            "GET",
+            f"/projects/{project_code}/workflow-definition/{workflow_code}",
+        )
+        if not ok:
+            return {
+                "verified": False,
+                "read_ok": False,
+                "mismatches": [
+                    {"field": "workflow_read", "expected": "readable", "actual": result}
+                ],
+            }
+
+        detail = self._unwrap_workflow_detail(result)
+        tasks = self._get_workflow_task_definitions(detail)
+        tasks_by_code = {self._safe_int(task.get("code")): task for task in tasks}
+
+        offenders: list[Dict[str, Any]] = []
+        for expected in expected_task_definitions:
+            code = self._safe_int(expected.get("code"))
+            actual = tasks_by_code.get(code)
+            if actual is None:
+                offenders.append(
+                    {
+                        "task_code": code,
+                        "task_name": str(expected.get("name") or "").strip(),
+                        "issue": "task_missing_after_update",
+                    }
+                )
+                continue
+            want = str(
+                expected.get("environmentCode")
+                if expected.get("environmentCode") is not None
+                else ""
+            ).strip()
+            got = str(
+                actual.get("environmentCode")
+                if actual.get("environmentCode") is not None
+                else ""
+            ).strip()
+            if want != got:
+                offenders.append(
+                    {
+                        "task_code": code,
+                        "task_name": str(actual.get("name") or "").strip(),
+                        "expected_environment_code": want,
+                        "actual_environment_code": got,
+                    }
+                )
+
+        mismatches: list[Dict[str, Any]] = []
+        if offenders:
+            mismatches.append({"field": "task_environment_code", "actual": offenders})
+        if len(tasks) != len(expected_task_definitions):
+            mismatches.append(
+                {
+                    "field": "task_definition_count",
+                    "expected": len(expected_task_definitions),
+                    "actual": len(tasks),
+                }
+            )
+        actual_names = self._extract_workflow_global_param_names(detail)
+        if actual_names != expected_global_param_names:
+            mismatches.append(
+                {
+                    "field": "global_param_names",
+                    "expected": sorted(expected_global_param_names),
+                    "actual": sorted(actual_names),
+                }
+            )
+        return {
+            "verified": not mismatches,
+            "read_ok": True,
+            "mismatches": mismatches,
+            "global_param_names": sorted(actual_names),
+            "task_definition_count": len(tasks),
+        }
+
+    def _restore_workflow_environment(
+        self,
+        *,
+        project_code: str,
+        workflow_code: str,
+        original_detail: Dict[str, Any],
+        original_task_definitions: list[Dict[str, Any]],
+        original_task_relations: list[Dict[str, Any]],
+        original_locations: list[Dict[str, Any]],
+        original_global_params_verbatim: Any,
+        expected_global_param_names: set[str],
+    ) -> Dict[str, Any]:
+        form = self._build_workflow_update_form(
+            workflow_detail=original_detail,
+            payload={},
+            task_definitions=[deepcopy(task) for task in original_task_definitions],
+            task_relations=[deepcopy(relation) for relation in original_task_relations],
+            locations=[deepcopy(location) for location in original_locations],
+            global_params_verbatim=original_global_params_verbatim,
+        )
+        ok, update_result = self._update_workflow_definition(project_code, workflow_code, form)
+        accepted = bool(ok) and self._is_ds_success(update_result)
+        if not accepted:
+            return {
+                "attempted": True,
+                "accepted": False,
+                "verified": False,
+                "update_result": update_result,
+            }
+        verification = self._verify_workflow_environment(
+            project_code=project_code,
+            workflow_code=workflow_code,
+            expected_task_definitions=original_task_definitions,
+            expected_global_param_names=expected_global_param_names,
+        )
+        return {
+            "attempted": True,
+            "accepted": True,
+            "verified": bool(verification.get("verified")),
+            "verification": verification,
+            "update_result": update_result,
+        }
+
+    @staticmethod
+    def _schedule_snapshot_is_reliable(snapshot: Dict[str, Any]) -> bool:
+        """Guard against writing a schedule form built from an empty read.
+
+        Rebuilding a schedule write form from a failed / partial read would
+        overwrite the crontab, window and alert settings with blanks, so the
+        switch is refused unless the snapshot actually looks like a schedule.
+        """
+        schedule = snapshot.get("schedule")
+        if not isinstance(schedule, dict):
+            return False
+        return bool(
+            str(schedule.get("crontab") or "").strip()
+            and str(schedule.get("startTime") or "").strip()
+            and str(schedule.get("endTime") or "").strip()
+        )
+
+    def _verify_schedule_environment(
+        self,
+        *,
+        project_code: str,
+        schedule_id: str,
+        before: Dict[str, Any],
+        target_environment_code: str,
+    ) -> Dict[str, Any]:
+        ok, result = self.get_schedule(
+            {"project_code": project_code, "schedule_id": schedule_id}
+        )
+        if not ok:
+            return {
+                "verified": False,
+                "read_ok": False,
+                "mismatches": [
+                    {"field": "schedule_read", "expected": "readable", "actual": result}
+                ],
+            }
+        after = normalize_schedule_record(result)
+        mismatches = verify_restored(before, after)
+        mismatches.pop("environment_code", None)
+        actual_environment = str(
+            after.get("environment_code")
+            if after.get("environment_code") is not None
+            else ""
+        ).strip()
+        if actual_environment != target_environment_code:
+            mismatches["environment_code"] = {
+                "expected": target_environment_code,
+                "actual": after.get("environment_code"),
+            }
+        return {
+            "verified": not mismatches,
+            "read_ok": True,
+            "mismatches": mismatches,
+        }
+
+    def _switch_schedule_environment(
+        self,
+        *,
+        project_code: str,
+        workflow_code: str,
+        schedule_id: str,
+        target_environment_code: str,
+        dry_run: bool,
+        enabled: bool,
+    ) -> Dict[str, Any]:
+        """Switch only ``environmentCode`` on a workflow's schedule.
+
+        The write form is always rebuilt from the live schedule snapshot, so the
+        crontab, window, timezone, alert group, priority, worker group, tenant
+        and start params are preserved verbatim.
+        """
+        if not schedule_id:
+            return {
+                "status": "NO_SCHEDULE",
+                "attempted": False,
+                "changed": False,
+                "would_change": False,
+                "schedule_id": "",
+                "warning": None,
+            }
+
+        ok, result = self.get_schedule(
+            {"project_code": project_code, "schedule_id": schedule_id, "workflow_code": workflow_code}
+        )
+        if not ok:
+            return {
+                "status": "SCHEDULE_READ_FAILED",
+                "attempted": False,
+                "changed": False,
+                "would_change": False,
+                "schedule_id": schedule_id,
+                "warning": "SCHEDULE_ENVIRONMENT_READ_FAILED",
+                "detail": result,
+            }
+
+        before = normalize_schedule_record(result)
+        if not self._schedule_snapshot_is_reliable(before):
+            return {
+                "status": "SCHEDULE_SNAPSHOT_UNRELIABLE",
+                "attempted": False,
+                "changed": False,
+                "would_change": False,
+                "schedule_id": schedule_id,
+                "warning": "SCHEDULE_SNAPSHOT_UNRELIABLE",
+                "snapshot": before,
+            }
+
+        environment_before = before.get("environment_code")
+        current_environment = str(
+            environment_before if environment_before is not None else ""
+        ).strip()
+        base = {
+            "schedule_id": schedule_id,
+            "environment_code_before": environment_before,
+            "environment_code_after": target_environment_code,
+        }
+
+        if current_environment == target_environment_code:
+            return {
+                **base,
+                "status": "SKIPPED_ALREADY_MATCHED",
+                "attempted": False,
+                "changed": False,
+                "would_change": False,
+                "warning": None,
+            }
+        if not enabled:
+            return {
+                **base,
+                "status": "NOT_REQUESTED",
+                "attempted": False,
+                "changed": False,
+                "would_change": True,
+                "warning": "SCHEDULE_ENVIRONMENT_NOT_SWITCHED",
+            }
+        if dry_run:
+            return {
+                **base,
+                "status": "DRY_RUN_MATCHED",
+                "attempted": False,
+                "changed": False,
+                "would_change": True,
+                "warning": None,
+            }
+
+        form = build_schedule_write_form(before, environment_code=target_environment_code)
+        write_ok, write_result = self.request(
+            "PUT", f"/projects/{project_code}/schedules/{schedule_id}", form=form
+        )
+        if not write_ok or not self._is_ds_success(write_result):
+            return {
+                **base,
+                "status": "FAILED_UNCHANGED",
+                "attempted": True,
+                "changed": False,
+                "would_change": True,
+                "warning": "SCHEDULE_ENVIRONMENT_UPDATE_FAILED",
+                "detail": write_result,
+            }
+
+        verification = self._verify_schedule_environment(
+            project_code=project_code,
+            schedule_id=schedule_id,
+            before=before,
+            target_environment_code=target_environment_code,
+        )
+        if verification.get("verified"):
+            return {
+                **base,
+                "status": "UPDATED",
+                "attempted": True,
+                "changed": True,
+                "would_change": True,
+                "warning": None,
+                "verification": verification,
+            }
+
+        rollback_form = build_schedule_write_form(before)
+        rollback_ok, rollback_result = self.request(
+            "PUT", f"/projects/{project_code}/schedules/{schedule_id}", form=rollback_form
+        )
+        rollback_verified = False
+        if rollback_ok and self._is_ds_success(rollback_result):
+            rollback_verification = self._verify_schedule_environment(
+                project_code=project_code,
+                schedule_id=schedule_id,
+                before=before,
+                target_environment_code=current_environment,
+            )
+            rollback_verified = bool(rollback_verification.get("verified"))
+        return {
+            **base,
+            "status": (
+                "VERIFICATION_FAILED_ROLLED_BACK"
+                if rollback_verified
+                else "FAILED_ROLLBACK_FAILED"
+            ),
+            "attempted": True,
+            "changed": False,
+            "would_change": True,
+            "warning": "SCHEDULE_ENVIRONMENT_VERIFICATION_FAILED",
+            "verification": verification,
+            "rollback_verified": rollback_verified,
+            "rollback_result": rollback_result,
+        }
+
+    def batch_update_workflow_environment(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[bool, Any]:
+        """Switch ``environmentCode`` for many workflows in one country.
+
+        Two phases, mirroring the schedule-alert batch safety gate:
+
+        1. **Preflight, zero writes.** Every workflow is read and its global
+           params snapshot is validated. A single unreadable definition aborts
+           the whole batch before anything is written.
+        2. **Serial execution.** Workflows are switched one by one; a failing
+           workflow is recorded without masking the others.
+
+        ``dry_run`` defaults to ``true`` and must be the boolean ``false`` to
+        write.
+        """
+        project_code, project_err = self._resolve_project_code(payload)
+        if project_err is not None:
+            return False, project_err
+        if not project_code:
+            return False, {
+                "code": "PROJECT_CODE_REQUIRED",
+                "message": "project_code or project_name is required",
+            }
+
+        raw_codes = payload.get("workflow_codes")
+        if isinstance(raw_codes, str):
+            raw_codes = [raw_codes]
+        if not isinstance(raw_codes, list) or not raw_codes:
+            return False, {
+                "code": "INVALID_WORKFLOW_CODES",
+                "message": "workflow_codes must be a non-empty array of workflow codes",
+            }
+        workflow_codes: list[str] = []
+        for value in raw_codes:
+            code = str(value or "").strip()
+            if not code:
+                return False, {
+                    "code": "INVALID_WORKFLOW_CODES",
+                    "message": "workflow_codes must not contain empty values",
+                }
+            if code not in workflow_codes:
+                workflow_codes.append(code)
+
+        target_environment_code = str(payload.get("environment_code") or "").strip()
+        if not target_environment_code:
+            return False, {
+                "code": "ENVIRONMENT_CODE_REQUIRED",
+                "message": "environment_code is required",
+            }
+
+        flags: Dict[str, bool] = {}
+        for field, default in (
+            ("dry_run", True),
+            ("include_schedule", False),
+            ("restore_original_state", True),
+            ("auto_offline", True),
+            ("require_global_params", False),
+        ):
+            valid, value, error = self._resolve_bool_field(payload, field, default)
+            if not valid:
+                return False, error
+            flags[field] = value
+
+        rate_limit_ms = payload.get("rate_limit_ms", 100)
+        if (
+            isinstance(rate_limit_ms, bool)
+            or not isinstance(rate_limit_ms, int)
+            or not 0 <= rate_limit_ms <= 10000
+        ):
+            return False, {
+                "code": "INVALID_RATE_LIMIT",
+                "message": "rate_limit_ms must be an integer between 0 and 10000",
+            }
+
+        preflight_errors: list[Dict[str, Any]] = []
+        for code in workflow_codes:
+            read_ok, read_result = self.request(
+                "GET",
+                f"/projects/{project_code}/workflow-definition/{code}",
+            )
+            if not read_ok:
+                preflight_errors.append(
+                    {
+                        "workflow_code": code,
+                        "code": "WORKFLOW_READ_FAILED",
+                        "detail": read_result,
+                    }
+                )
+                continue
+            detail = self._unwrap_workflow_detail(read_result)
+            if not detail:
+                preflight_errors.append(
+                    {
+                        "workflow_code": code,
+                        "code": "WORKFLOW_DETAIL_EMPTY",
+                    }
+                )
+                continue
+            if not self._get_workflow_task_definitions(detail):
+                preflight_errors.append(
+                    {
+                        "workflow_code": code,
+                        "code": "WORKFLOW_HAS_NO_TASKS",
+                    }
+                )
+                continue
+            snapshot = self._collect_workflow_global_params_snapshot(detail)
+            if snapshot.get("error"):
+                preflight_errors.append(
+                    {
+                        "workflow_code": code,
+                        "code": snapshot["error"].get("code"),
+                        "message": snapshot["error"].get("message"),
+                        "detail": snapshot["error"],
+                    }
+                )
+                continue
+            if flags["require_global_params"]:
+                # Enforce the hard gate here as well, so a batch requested with
+                # require_global_params can never half-apply: without this the
+                # offending workflow would only fail later, after its
+                # predecessors had already been switched.
+                integrity_issue = self._detect_workflow_param_integrity_issue(
+                    detail, self._get_workflow_task_definitions(detail)
+                )
+                if integrity_issue:
+                    preflight_errors.append(
+                        {
+                            "workflow_code": code,
+                            "code": "GLOBAL_PARAMS_REQUIRED",
+                            "message": integrity_issue.get("message"),
+                            "detail": integrity_issue,
+                        }
+                    )
+
+        if preflight_errors:
+            return False, {
+                "code": "BATCH_PREFLIGHT_FAILED",
+                "message": (
+                    "batch preflight failed; no workflow was modified. Resolve the listed "
+                    "workflows or re-run with an explicit safe subset."
+                ),
+                "project_code": project_code,
+                "environment_code": target_environment_code,
+                "workflow_codes": workflow_codes,
+                "errors": preflight_errors,
+                "dry_run": flags["dry_run"],
+            }
+
+        results: list[Dict[str, Any]] = []
+        for index, code in enumerate(workflow_codes):
+            item_payload = {
+                **payload,
+                "project_code": project_code,
+                "workflow_code": code,
+                "environment_code": target_environment_code,
+                "dry_run": flags["dry_run"],
+                "include_schedule": flags["include_schedule"],
+                "restore_original_state": flags["restore_original_state"],
+                "auto_offline": flags["auto_offline"],
+                "require_global_params": flags["require_global_params"],
+            }
+            ok, result = self.update_workflow_environment(item_payload)
+            if isinstance(result, dict):
+                status = str(result.get("status") or ("FAILED_UNCHANGED" if not ok else "UNKNOWN"))
+                results.append({"workflow_code": code, "success": bool(ok), **result, "status": status})
+            else:
+                results.append(
+                    {
+                        "workflow_code": code,
+                        "success": bool(ok),
+                        "status": "FAILED_UNCHANGED" if not ok else "UNKNOWN",
+                        "detail": result,
+                    }
+                )
+            if not flags["dry_run"] and rate_limit_ms > 0 and index < len(workflow_codes) - 1:
+                time.sleep(rate_limit_ms / 1000.0)
+
+        summary = self._summarize_environment_switch_results(results)
+        return True, {
+            "status": "BATCH_COMPLETED",
+            "dry_run": flags["dry_run"],
+            "project_code": project_code,
+            "environment_code": target_environment_code,
+            "include_schedule": flags["include_schedule"],
+            "total": len(workflow_codes),
+            "summary": summary,
+            "results": results,
+        }
+
+    @staticmethod
+    def _schedule_write_failed(schedule_result: Any) -> bool:
+        """True when a schedule switch was attempted and did not end verified.
+
+        ``SCHEDULE_READ_FAILED`` / ``SCHEDULE_SNAPSHOT_UNRELIABLE`` are excluded:
+        those mean nothing was attempted and already carry their own warning.
+        These three mean the write happened and did not stick.
+        """
+        if not isinstance(schedule_result, dict):
+            return False
+        return str(schedule_result.get("status") or "").upper() in {
+            "FAILED_UNCHANGED",
+            "VERIFICATION_FAILED_ROLLED_BACK",
+            "FAILED_ROLLBACK_FAILED",
+        }
+
+    @staticmethod
+    def _summarize_environment_switch_results(
+        results: list[Dict[str, Any]],
+    ) -> Dict[str, int]:
+        summary = {
+            "total": len(results),
+            "matched": 0,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "verification_failed": 0,
+            "rolled_back": 0,
+            "rollback_failed": 0,
+            # A workflow can switch cleanly while its schedule switch fails;
+            # without this counter the batch summary would look fully green.
+            "schedule_failed": 0,
+        }
+        for item in results:
+            status = str(item.get("status") or "").upper()
+            if item.get("schedule_failed"):
+                summary["schedule_failed"] += 1
+            if status == "UPDATED":
+                summary["matched"] += 1
+                summary["updated"] += 1
+            elif status == "DRY_RUN_MATCHED":
+                summary["matched"] += 1
+            elif status == "SKIPPED_ALREADY_MATCHED":
+                summary["skipped"] += 1
+            elif status == "VERIFICATION_FAILED_ROLLED_BACK":
+                summary["failed"] += 1
+                summary["verification_failed"] += 1
+                summary["rolled_back"] += 1
+            elif status == "FAILED_ROLLED_BACK":
+                summary["failed"] += 1
+                summary["rolled_back"] += 1
+            elif status == "FAILED_ROLLBACK_FAILED":
+                summary["failed"] += 1
+                summary["rollback_failed"] += 1
+            else:
+                summary["failed"] += 1
+        return summary
+
     def _update_workflow_definition(
         self,
         project_code: str,
@@ -3847,6 +5155,7 @@ class DolphinSchedulerClient:
         task_definitions: list[Dict[str, Any]],
         task_relations: list[Dict[str, Any]],
         locations: list[Dict[str, Any]],
+        global_params_verbatim: Any = None,
     ) -> Dict[str, Any]:
         workflow_meta = self._get_workflow_meta(workflow_detail)
         name = (
@@ -3896,6 +5205,17 @@ class DolphinSchedulerClient:
             "taskDefinitionJson": json.dumps(task_definitions, ensure_ascii=False),
             "executionType": execution_type,
         }
+        if global_params_verbatim is not None:
+            # Environment switch: write back exactly what the live definition
+            # holds instead of a value rebuilt from the request payload, so an
+            # environment-only update can never drop workflow global params.
+            form["globalParams"] = (
+                global_params_verbatim
+                if isinstance(global_params_verbatim, str)
+                else json.dumps(global_params_verbatim, ensure_ascii=False)
+            )
+            if form["globalParams"] in ("", None):
+                form["globalParams"] = "[]"
         schedule_value = payload.get("schedule_json")
         if schedule_value is None:
             schedule_value = self._get_workflow_schedule(workflow_detail)
@@ -4038,7 +5358,10 @@ class DolphinSchedulerClient:
         if isinstance(normalized, list):
             for item in normalized:
                 if isinstance(item, dict):
-                    prop = str(item.get("prop") or "").strip()
+                    # Accept ``name`` as well as ``prop``: the snapshot reader
+                    # does, and a mismatch here would make verification fail for
+                    # a definition that is actually intact.
+                    prop = str(item.get("prop") or item.get("name") or "").strip()
                     if prop:
                         names.add(prop)
         for source in (workflow_meta.get("globalParamMap"), workflow_detail.get("globalParamMap")):

@@ -44,6 +44,8 @@ SUPPORTED_ACTIONS = {
     "update_task",
     "update_sql_task",
     "update_shell_task",
+    "update_workflow_environment",
+    "batch_update_workflow_environment",
     "disable_task",
     "disable_tasks_except",
     "delete_task",

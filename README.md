@@ -47,6 +47,8 @@
 - `update_task`
 - `update_sql_task`
 - `update_shell_task`
+- `update_workflow_environment`
+- `batch_update_workflow_environment`
 - `disable_task`
 - `disable_tasks_except`
 - `delete_task`
@@ -105,6 +107,136 @@
 汇总字段：`total / matched / updated / skipped / failed / verification_failed / rolled_back / rollback_failed`。
 
 生产门禁固定为：精确查告警组 → 单国家单项目 dry-run → 单条正式更新 → `get_schedule` → rollback → 再次 `get_schedule`。恢复完全正确后才能扩大 dry-run，批量正式执行仍需用户明确批准。
+
+
+## 环境切换（`update_workflow_environment` / `batch_update_workflow_environment`）
+
+用于把工作流批量切到另一个 DS 环境（`environmentCode`，例如 `dim_feature_dic -ds_develop` 切环境）。
+
+### 为什么需要专用能力
+
+`append_task` / `update_task` / `delete_task` 这类结构修改动作会**从请求 payload 重建整个工作流定义表单**，
+因此当线上定义的 `globalParams` 已经为空、但任务脚本仍引用 `${dt}` 等变量时，网关会强制拒绝：
+
+```text
+workflow global params are empty but tasks still reference required workflow variables
+```
+
+**环境切换不需要重建任何东西**：本动作把线上定义原样读出来、原样写回去，只改 `environmentCode`。
+所以它既能穿过上面那道门禁，又不会丢任何全局参数。
+
+### 防丢参数（anti-wipe）保证
+
+1. `globalParams` 从线上定义**逐字回写**，绝不用 payload 里的默认值重建。
+2. 如果 `globalParams` / `globalParamList` 读取结果不一致，或某个值不是合法 JSON（说明这次读取不可信），
+   直接返回 `GLOBAL_PARAMS_UNREADABLE` 并**拒绝写入**，而不是把参数写没。
+3. 写后回读校验：每个任务的 `environmentCode`、全局参数名集合、任务数量都必须和预期一致；不一致自动回滚到原定义并再次校验。
+4. 原本已经是「全局参数为空 + 任务引用变量」的工作流**允许**切换（因为回写是逐字的，不会变得更糟），
+   但响应会带 `PRE_EXISTING_MISSING_GLOBAL_PARAMS` 警告和 `integrity_warning` 明细。
+   需要硬门禁时传 `require_global_params: true`。
+5. 没有任何任务需要改时不提交定义（避免无意义的版本变更）。
+
+### `update_workflow_environment`
+
+必填：`project_code`（或 `project_name`）、`workflow_code`、`environment_code`。
+
+可选：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `dry_run` | `true` | **默认只预演不写入**；必须显式传布尔 `false` 才真正切换 |
+| `include_schedule` | `false` | 一并切换该工作流定时的 `environmentCode` |
+| `restore_original_state` | `true` | 改完恢复原来的上下线状态 |
+| `auto_offline` | `true` | 先下线再改（DS 要求） |
+| `require_global_params` | `false` | `true` 时全局参数缺失直接阻断，而不是只告警 |
+
+```json
+{
+  "project_code": "158514956085248",
+  "workflow_code": "174599383687393",
+  "environment_code": "12813621425120",
+  "dry_run": true
+}
+```
+
+响应关键字段：`status`（`DRY_RUN_MATCHED` / `UPDATED` / `SKIPPED_ALREADY_MATCHED` /
+`VERIFICATION_FAILED_ROLLED_BACK` / `FAILED_ROLLBACK_FAILED` / `FAILED_UNCHANGED`）、
+`changed_tasks`、`global_params_preserved`、`warnings`、`verification`、`rollback`、
+以及可直接回传的 `rollback_payload`。
+
+### `batch_update_workflow_environment`
+
+必填：`project_code`、`workflow_codes`（唯一非空数组）、`environment_code`。
+
+安全约束：
+
+- `dry_run` 默认 `true`，只有布尔 `false` 才进入正式切换。
+- **两阶段执行**：先对全部工作流做零写入预检（逐个校验读取可信度），任一工作流预检失败则整批中止、零写入；
+  预检通过后才逐条串行切换。
+- 单条失败不掩盖其它结果，逐条状态与汇总计数一并返回。
+
+逐条状态：`DRY_RUN_MATCHED / UPDATED / SKIPPED_ALREADY_MATCHED / FAILED_UNCHANGED /
+VERIFICATION_FAILED_ROLLED_BACK / FAILED_ROLLBACK_FAILED / NOT_REQUESTED / SCHEDULE_SNAPSHOT_UNRELIABLE`。
+
+汇总字段：`total / matched / updated / skipped / failed / verification_failed / rolled_back / rollback_failed / schedule_failed`。
+
+`schedule_failed` 单独计数：工作流本身切换成功、但被请求的定时切换失败（`FAILED_UNCHANGED` /
+`VERIFICATION_FAILED_ROLLED_BACK` / `FAILED_ROLLBACK_FAILED`）时也会 +1，
+避免「工作流全绿」掩盖定时没切成功。单条结果里同名布尔字段含义相同。
+
+### 读回可信度与告警
+
+| 警告 | 含义 |
+|---|---|
+| `GLOBAL_PARAMS_UNREADABLE`（错误，阻断） | `globalParams` / `globalParamList` / `globalParamMap` 有一项不是合法 JSON 或类型不对，本次读取不可信，**拒绝写入** |
+| `GLOBAL_PARAMS_ABSENT_ASSUMED_EMPTY` | 响应里完全没有全局参数字段，按「确实没有」处理并写回空列表；出现它说明这次判断依赖了「字段缺失」这一假设 |
+| `GLOBAL_PARAMS_FROM_MAP_FALLBACK` | 只有 `globalParamMap`，据此重建参数列表 |
+| `GLOBAL_PARAMS_MAP_EXTRA_NAMES` | 有仅存在于 `globalParamMap` 的参数名，不会被写回；这些名字在 `global_params_map_only` 里列出 |
+| `PRE_EXISTING_MISSING_GLOBAL_PARAMS` | 该工作流本来就「全局参数为空 + 任务引用变量」，不是本次造成的 |
+
+响应里 `global_params_preserved` 是**实际写回**的参数名（写后校验也用它作为期望集合），
+`global_params_map_only` 是只存在于 map、未写回的名字。
+`rollback_payload.restorable` 只有在所有任务本来就有**同一个**环境编码时才为 `true`；
+有任务原本没有环境编码时为 `false`（否则回滚会给它写上一个从未有过的编码）。
+
+### 状态与错误码速查
+
+`update_workflow_environment` 的 `status`：
+
+| status | 含义 | 是否已写库 |
+|---|---|---|
+| `DRY_RUN_MATCHED` | 预演：有任务需要改 | 否 |
+| `UPDATED` | 已切换且写后回读校验通过 | 是 |
+| `SKIPPED_ALREADY_MATCHED` | 任务已是目标环境，未提交定义 | 否 |
+| `FAILED_UNCHANGED` | DS 拒绝了本次写入 | 否 |
+| `VERIFICATION_FAILED_ROLLED_BACK` | 写后校验不通过，已回滚且回滚校验通过 | 否（已回滚） |
+| `FAILED_ROLLBACK_FAILED` | 写后校验不通过，且回滚也未通过 | **需人工介入** |
+
+批量动作整体 `status` 为 `BATCH_COMPLETED`；预检失败时为 `BATCH_PREFLIGHT_FAILED`（整批零写入，
+失败原因在 `errors` 里逐条列出）。
+
+`schedule.status`：`NO_SCHEDULE`（该工作流无定时）、`NOT_REQUESTED`（定时环境与目标不同但未请求切换）、
+`SCHEDULE_READ_FAILED`、`SCHEDULE_SNAPSHOT_UNRELIABLE`（读取不可信，拒绝写入）、
+`SKIPPED_ALREADY_MATCHED`、`DRY_RUN_MATCHED`、`UPDATED`、`FAILED_UNCHANGED`、
+`VERIFICATION_FAILED_ROLLED_BACK`、`FAILED_ROLLBACK_FAILED`。
+
+错误码：`PROJECT_CODE_REQUIRED`、`WORKFLOW_CODE_REQUIRED`、`ENVIRONMENT_CODE_REQUIRED`、
+`INVALID_WORKFLOW_CODES`、`INVALID_RATE_LIMIT`、`INVALID_BOOLEAN_FIELD`、
+`GLOBAL_PARAMS_UNREADABLE`、`GLOBAL_PARAMS_REQUIRED`、`OFFLINE_BEFORE_UPDATE_FAILED`、
+`WORKFLOW_UPDATE_FAILED`；批量预检的逐条原因另有 `WORKFLOW_READ_FAILED`、
+`WORKFLOW_DETAIL_EMPTY`、`WORKFLOW_HAS_NO_TASKS`。
+
+### 定时（schedule）环境字段
+
+定时记录自己也有 `environmentCode`，定时跑起来时用的是它。本动作**默认不动定时**，只检查并在不一致时返回
+`SCHEDULE_ENVIRONMENT_NOT_SWITCHED` 警告；需要一起切就传 `include_schedule: true`。
+切换定时时会用只替换 `environmentCode` 的完整表单写回（cron、起止时间、时区、告警组、优先级、worker group、
+tenant、startParams 全部保留），并且读取不可信（缺 cron / 起止时间）时拒绝写入。
+
+### 生产门禁建议
+
+与定时告警一致：单国家单工作流 `dry-run` → 单条正式切换 → 回读校验 → 用 `rollback_payload` 回滚 → 再次回读，
+确认完全正确后再扩大批量。
 
 
 ## 新增：定时任务失败监控

@@ -97,7 +97,15 @@ def build_schedule_write_form(
     *,
     warning_type: Any = None,
     warning_group_id: Any = None,
+    environment_code: Any = None,
 ) -> Dict[str, Any]:
+    """Build a lossless schedule write form from a live schedule snapshot.
+
+    ``environment_code`` is an optional override used by the workflow
+    environment switch: every other field is still taken verbatim from the live
+    schedule, so switching the environment can never drop the crontab, window,
+    alert group, priority, worker group or start params.
+    """
     form = {
         snapshot["workflow_code_key"]: snapshot["workflow_code"],
         "warningType": snapshot["warning_type"] if warning_type is None else normalize_warning_type(warning_type),
@@ -109,8 +117,11 @@ def build_schedule_write_form(
         "releaseState": snapshot["release_state"],
         "schedule": _form_json(snapshot["schedule"]),
     }
-    if snapshot["environment_code"] not in (None, ""):
-        form["environmentCode"] = snapshot["environment_code"]
+    resolved_environment_code = (
+        snapshot["environment_code"] if environment_code is None else environment_code
+    )
+    if resolved_environment_code not in (None, ""):
+        form["environmentCode"] = resolved_environment_code
     if snapshot["start_params"] not in (None, ""):
         form["startParams"] = _form_json(snapshot["start_params"])
     return form
