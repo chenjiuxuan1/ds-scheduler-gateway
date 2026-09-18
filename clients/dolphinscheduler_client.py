@@ -2897,7 +2897,21 @@ class DolphinSchedulerClient:
         workflow_meta = self._get_workflow_meta(detail)
         integrity_issue = self._detect_workflow_param_integrity_issue(detail, task_definitions)
         if integrity_issue:
-            return False, integrity_issue
+            # Default stays "refuse": this guard protects structural edits, and a
+            # caller that has not thought about it must never drop params. A
+            # change that provably cannot touch parameters -- retry counts,
+            # timeouts -- may pass require_global_params=false, and then the
+            # guard's finding is returned as a warning instead of blocking.
+            valid, require_global_params, bool_error = self._resolve_bool_field(
+                payload, "require_global_params", True
+            )
+            if not valid:
+                return False, bool_error
+            if require_global_params:
+                return False, integrity_issue
+            integrity_warning = integrity_issue
+        else:
+            integrity_warning = None
 
         target_task = self._find_task(task_definitions, task_name=task_name, task_code=task_code)
         if not target_task:
@@ -3023,6 +3037,8 @@ class DolphinSchedulerClient:
             "update_result": update_result,
             "restore_result": restore_result,
             "restore_schedule_result": restore_schedule_result,
+            # Present only when the caller overrode the global-params guard.
+            "integrity_warning": integrity_warning,
         }
 
     def disable_task(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:

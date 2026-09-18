@@ -38,6 +38,7 @@ def shell_task(
     fail_retry_times=0,
     fail_retry_interval=1,
     environment_code=-1,
+    script="echo hello",
 ):
     """A SHELL task with every field the updater would otherwise default in."""
     return {
@@ -57,7 +58,7 @@ def shell_task(
         "timeout": 0,
         "delayTime": 0,
         "taskParams": {
-            "rawScript": "echo hello",
+            "rawScript": script,
             "localParams": [],
             "resourceList": [],
             "dependence": {},
@@ -68,7 +69,8 @@ def shell_task(
     }
 
 
-def workflow_detail(tasks, *, release_state="OFFLINE", schedule_release_state="OFFLINE"):
+def workflow_detail(tasks, *, release_state="OFFLINE", schedule_release_state="OFFLINE",
+                    global_params="[]"):
     return {
         "code": 0,
         "data": {
@@ -81,7 +83,7 @@ def workflow_detail(tasks, *, release_state="OFFLINE", schedule_release_state="O
                 "tenantCode": "default",
                 "executionType": "PARALLEL",
                 "timeout": 0,
-                "globalParams": "[]",
+                "globalParams": global_params,
             },
             "taskDefinitionList": tasks,
             "workflowTaskRelationList": [],
@@ -278,6 +280,62 @@ class RetryValidationTests(unittest.TestCase):
 
         self.assertFalse(ok, result)
         self.assertEqual("fail_retry_interval", result["field"])
+        self.assertEqual([], client.writes())
+
+
+class GlobalParamsGuardOverrideTests(unittest.TestCase):
+    """The guard protects structural edits; a retry-only edit may opt out.
+
+    DS holds ``failRetryTimes`` as a scalar sibling of ``taskType``, so a retry
+    change cannot touch workflow parameters. Some PK workflows nonetheless have
+    an empty ``globalParams`` while their scripts reference ``${dt}`` (they were
+    built that way -- the definition log never had params for them), and the
+    blanket guard blocked a change that provably cannot make them worse.
+    """
+
+    def _client_with_referencing_task(self, global_params):
+        detail = workflow_detail(
+            [shell_task(script="python3 x.py --dt=${dt}")],
+            global_params=global_params,
+        )
+        return FakeClient([(True, detail), WRITE_OK, (True, detail)])
+
+    def test_guard_still_blocks_by_default(self):
+        client = self._client_with_referencing_task("[]")
+        ok, result = client.update_task(payload(fail_retry_times=3))
+        self.assertFalse(ok)
+        self.assertIn("global params are empty", result["message"])
+        self.assertEqual(["dt"], result["required_workflow_params"])
+        # Nothing reached DS.
+        self.assertEqual([], client.writes())
+
+    def test_explicit_opt_out_allows_a_retry_only_change(self):
+        client = self._client_with_referencing_task("[]")
+        ok, result = client.update_task(
+            payload(fail_retry_times=3, fail_retry_interval=2,
+                    require_global_params=False)
+        )
+        self.assertTrue(ok, result)
+        self.assertEqual(3, result["fail_retry_times"])
+        # The override is recorded, never silent.
+        self.assertIsNotNone(result["integrity_warning"])
+        self.assertIn("global params are empty", result["integrity_warning"]["message"])
+
+    def test_no_warning_when_the_workflow_has_params(self):
+        client = self._client_with_referencing_task(
+            '[{"prop":"dt","direct":"IN","type":"VARCHAR","value":""}]'
+        )
+        ok, result = client.update_task(payload(fail_retry_times=3))
+        self.assertTrue(ok, result)
+        self.assertIsNone(result["integrity_warning"])
+
+    def test_opt_out_is_boolean_validated(self):
+        client = self._client_with_referencing_task("[]")
+        ok, result = client.update_task(
+            payload(fail_retry_times=3, require_global_params="yes")
+        )
+        self.assertFalse(ok)
+        self.assertEqual("INVALID_BOOLEAN_FIELD", result["code"])
         self.assertEqual([], client.writes())
 
 
