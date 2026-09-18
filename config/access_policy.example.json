@@ -14,13 +14,13 @@
     "maxTriggersPerHour": 30
   },
   "tokens": {
-    "289e723fd059f1ea95ef0bb377eb1a95": {
-      "user": "jiangchuanchen",
-      "role": "admin",
+    "<DS_TOKEN>": {
+      "user": "<ds-username>",
+      "role": "operator",
       "enabled": true,
       "allowedActions": null,
       "deniedActions": [],
-      "deleteAllowed": true,
+      "deleteAllowed": false,
       "limits": {}
     }
   }
