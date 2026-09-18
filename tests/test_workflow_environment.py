@@ -786,6 +786,48 @@ class HardeningTests(unittest.TestCase):
         self.assertTrue(result["results"][0]["schedule_failed"])
         self.assertIn("SCHEDULE_ENVIRONMENT_FAILED", result["results"][0]["warnings"])
 
+    def test_batch_isolates_an_item_that_raises(self):
+        """One exploding workflow must not discard the summary of the others."""
+        class Exploding(FakeClient):
+            def update_workflow_environment(self, payload):
+                if payload.get("workflow_code") == OTHER_WORKFLOW:
+                    raise RuntimeError("boom")
+                return super().update_workflow_environment(payload)
+
+        client = Exploding([
+            # preflight for both
+            (True, workflow_detail(tasks=[task("t1", 1)])),
+            (True, workflow_detail(tasks=[task("t2", 2)], workflow_code=OTHER_WORKFLOW)),
+            # workflow 1 switches cleanly
+            (True, workflow_detail(tasks=[task("t1", 1)])),
+            (True, {"code": 0, "msg": "success"}),
+            (True, workflow_detail(tasks=[task("t1", 1, environment_code=123)])),
+        ])
+        result_ok, result = client.batch_update_workflow_environment(
+            {"project_code": PROJECT, "workflow_codes": [WORKFLOW, OTHER_WORKFLOW],
+             "environment_code": "123", "dry_run": False, "rate_limit_ms": 0}
+        )
+        self.assertTrue(result_ok, result)
+        self.assertEqual(2, result["summary"]["total"])
+        self.assertEqual(1, result["summary"]["updated"])
+        self.assertEqual(1, result["summary"]["failed"])
+        failed = [item for item in result["results"] if item["workflow_code"] == OTHER_WORKFLOW][0]
+        self.assertFalse(failed["success"])
+        self.assertEqual("GATEWAY_ERROR", failed["code"])
+
+    def test_malformed_schedule_list_body_does_not_raise(self):
+        """A bare-array / non-dict schedules body must degrade, not explode."""
+        detail = workflow_detail(tasks=[task("t1", 1)])
+        # No scheduleReleaseState/scheduleId, so the list API is consulted.
+        del detail["data"]["workflowDefinition"]["scheduleReleaseState"]
+        client = FakeClient([
+            (True, detail),
+            (True, [{"id": "1", "processDefinitionCode": WORKFLOW}]),  # bare array body
+        ])
+        result_ok, result = client.update_workflow_environment(ok())
+        self.assertTrue(result_ok, result)
+        self.assertEqual("NO_SCHEDULE", result["schedule"]["status"])
+
 
 if __name__ == "__main__":
     unittest.main()

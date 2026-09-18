@@ -4897,7 +4897,15 @@ class DolphinSchedulerClient:
                 "auto_offline": flags["auto_offline"],
                 "require_global_params": flags["require_global_params"],
             }
-            ok, result = self.update_workflow_environment(item_payload)
+            try:
+                ok, result = self.update_workflow_environment(item_payload)
+            except Exception as exc:  # never lose the items already switched
+                ok, result = False, {
+                    "status": "FAILED_UNCHANGED",
+                    "code": "GATEWAY_ERROR",
+                    "message": "unexpected error while switching this workflow",
+                    "detail": repr(exc),
+                }
             if isinstance(result, dict):
                 status = str(result.get("status") or ("FAILED_UNCHANGED" if not ok else "UNKNOWN"))
                 results.append({"workflow_code": code, "success": bool(ok), **result, "status": status})
@@ -5523,7 +5531,11 @@ class DolphinSchedulerClient:
                 "raw": result,
             }
 
-        schedules = result.get("data", {}).get("totalList", [])
+        # Defensive: a malformed body (bare array, ``data`` as a list, null) must
+        # not raise. This helper sits on the batch environment-switch path, where
+        # an exception would abort the remote script mid-batch with no summary.
+        data = result.get("data") if isinstance(result, dict) else None
+        schedules = data.get("totalList", []) if isinstance(data, dict) else []
         if not isinstance(schedules, list):
             schedules = []
 
