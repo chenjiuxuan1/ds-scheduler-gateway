@@ -51,6 +51,7 @@ SUPPORTED_ACTIONS = {
     "delete_task",
     "dump_workflow_graph",
     "list_datasources",
+    "list_environments",
     "get_datasource",
     "extract_task_runtime_config",
     "list_resources",

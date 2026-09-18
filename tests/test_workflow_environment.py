@@ -129,11 +129,178 @@ def ok(**payload):
     return base
 
 
+def environments_response(*pairs):
+    """A DS environment-list body, newest first."""
+    return (True, {"code": 0, "data": {
+        "total": len(pairs),
+        "totalList": [
+            {"code": code, "name": name, "workerGroups": [], "description": ""}
+            for code, name in pairs
+        ],
+    }})
+
+
 class ActionRegistrationTests(unittest.TestCase):
     def test_actions_are_registered_and_classified_as_write(self):
         for action in ("update_workflow_environment", "batch_update_workflow_environment"):
             self.assertIn(action, SUPPORTED_ACTIONS)
             self.assertEqual("write", classify_action(action))
+
+    def test_list_environments_is_registered_and_classified_as_read(self):
+        # Looking up an environment must not require write permission.
+        self.assertIn("list_environments", SUPPORTED_ACTIONS)
+        self.assertEqual("read", classify_action("list_environments"))
+
+
+class EnvironmentLookupTests(unittest.TestCase):
+    def test_list_environments_exposes_names_and_codes(self):
+        client = FakeClient([environments_response(("111", "ds_develop"), ("222", "prod"))])
+        ok_result, result = client.list_environments({})
+        self.assertTrue(ok_result, result)
+        self.assertEqual("/environments", result["endpoint"])
+        self.assertEqual(
+            [{"code": "111", "name": "ds_develop", "worker_groups": [], "description": ""},
+             {"code": "222", "name": "prod", "worker_groups": [], "description": ""}],
+            result["totalList"],
+        )
+
+    def test_list_environments_falls_back_to_the_other_endpoint_spelling(self):
+        # Instances are not all on one DS release; only a 404/405 justifies retry.
+        client = FakeClient([
+            (False, {"status": 404, "body": {"message": "not found"}, "url": "u"}),
+            environments_response(("111", "ds_develop")),
+        ])
+        ok_result, result = client.list_environments({})
+        self.assertTrue(ok_result, result)
+        self.assertEqual("/environment", result["endpoint"])
+        self.assertEqual(["/environments", "/environment"],
+                         [c["path"] for c in client.calls])
+
+    def test_list_environments_does_not_mask_a_real_auth_failure(self):
+        # A 401 must surface as a 401, not as "we tried the other path too".
+        client = FakeClient([
+            (False, {"status": 401, "body": {"message": "unauthorized"}, "url": "u"}),
+        ])
+        ok_result, result = client.list_environments({})
+        self.assertFalse(ok_result)
+        self.assertEqual(401, result["status"])
+        self.assertEqual(["/environments"], [c["path"] for c in client.calls])
+
+    def test_enumeration_failure_is_not_silently_treated_as_no_match(self):
+        client = FakeClient([(False, {"status": 403, "body": {}, "url": "u"})])
+        ok_result, result = client.list_environments({})
+        self.assertFalse(ok_result)
+        self.assertEqual(403, result["status"])
+
+
+class EnvironmentNameResolutionTests(unittest.TestCase):
+    def test_name_resolves_to_code_and_switches(self):
+        client = FakeClient([
+            environments_response(("116401560288576", "ds_develop")),
+            (True, workflow_detail(tasks=[task("t1", 1)])),
+            (True, {"code": 0}),
+            # read-back verification, now showing the resolved code
+            (True, workflow_detail(tasks=[task("t1", 1, environment_code="116401560288576")])),
+        ])
+        ok_result, result = client.update_workflow_environment(
+            {"project_code": PROJECT, "workflow_code": WORKFLOW,
+             "environment_name": "ds_develop", "dry_run": False}
+        )
+        self.assertTrue(ok_result, result)
+        self.assertEqual("resolved_from_name", result["environment_resolution"]["source"])
+        self.assertEqual("116401560288576",
+                         result["environment_resolution"]["environment_code"])
+        # The resolved code is what actually got written.
+        self.assertEqual("116401560288576", result["environment_code"])
+
+    def test_explicit_code_does_not_trigger_a_lookup(self):
+        client = FakeClient([
+            (True, workflow_detail(tasks=[task("t1", 1)])),
+            (True, {"code": 0}),
+            (True, workflow_detail(tasks=[task("t1", 1, environment_code="123")])),
+        ])
+        ok_result, result = client.update_workflow_environment(ok(dry_run=False))
+        self.assertTrue(ok_result, result)
+        self.assertEqual("payload", result["environment_resolution"]["source"])
+        self.assertNotIn("/environments", [c["path"] for c in client.calls])
+
+    def test_unknown_name_fails_without_writing(self):
+        client = FakeClient([environments_response(("111", "prod"))])
+        ok_result, result = client.update_workflow_environment(
+            {"project_code": PROJECT, "workflow_code": WORKFLOW,
+             "environment_name": "ds_develop"}
+        )
+        self.assertFalse(ok_result)
+        self.assertEqual("ENVIRONMENT_NOT_FOUND", result["code"])
+        self.assertEqual(["prod"], result["available"])
+        self.assertEqual([], client.writes())
+
+    def test_near_match_is_rejected(self):
+        # "ds_develop_2" must never satisfy a request for "ds_develop": DS stores
+        # the code opaquely, so a loose match would silently move production.
+        client = FakeClient([environments_response(("111", "ds_develop_2"))])
+        ok_result, result = client.update_workflow_environment(
+            {"project_code": PROJECT, "workflow_code": WORKFLOW,
+             "environment_name": "ds_develop"}
+        )
+        self.assertFalse(ok_result)
+        self.assertEqual("ENVIRONMENT_NOT_FOUND", result["code"])
+        self.assertEqual([], client.writes())
+
+    def test_ambiguous_name_is_rejected_rather_than_guessed(self):
+        client = FakeClient([
+            environments_response(("111", "ds_develop"), ("222", "ds_develop")),
+        ])
+        ok_result, result = client.update_workflow_environment(
+            {"project_code": PROJECT, "workflow_code": WORKFLOW,
+             "environment_name": "ds_develop"}
+        )
+        self.assertFalse(ok_result)
+        self.assertEqual("ENVIRONMENT_NAME_AMBIGUOUS", result["code"])
+        self.assertEqual(2, len(result["candidates"]))
+        self.assertEqual([], client.writes())
+
+    def test_lookup_failure_is_reported_as_such_not_as_missing(self):
+        client = FakeClient([
+            (False, {"status": 401, "body": {"message": "unauthorized"}, "url": "u"})
+        ])
+        ok_result, result = client.update_workflow_environment(
+            {"project_code": PROJECT, "workflow_code": WORKFLOW,
+             "environment_name": "ds_develop"}
+        )
+        self.assertFalse(ok_result)
+        self.assertEqual("ENVIRONMENT_LOOKUP_FAILED", result["code"])
+        self.assertEqual([], client.writes())
+
+    def test_batch_resolves_the_name_once_and_reports_it(self):
+        client = FakeClient([
+            environments_response(("116401560288576", "ds_develop")),
+            (True, workflow_detail(tasks=[task("t1", 1)])),
+            (True, workflow_detail(tasks=[task("t2", 2)])),
+        ])
+        ok_result, result = client.batch_update_workflow_environment({
+            "project_code": PROJECT,
+            "workflow_codes": [WORKFLOW, OTHER_WORKFLOW],
+            "environment_name": "ds_develop",
+            "dry_run": True,
+        })
+        self.assertTrue(ok_result, result)
+        self.assertEqual("resolved_from_name", result["environment_resolution"]["source"])
+        self.assertEqual("116401560288576", result["environment_code"])
+        # Resolved once, not once per workflow.
+        self.assertEqual(1, [c["path"] for c in client.calls].count("/environments"))
+
+    def test_batch_unknown_name_stops_before_reading_any_workflow(self):
+        client = FakeClient([environments_response(("111", "prod"))])
+        ok_result, result = client.batch_update_workflow_environment({
+            "project_code": PROJECT,
+            "workflow_codes": [WORKFLOW, OTHER_WORKFLOW],
+            "environment_name": "ds_develop",
+        })
+        self.assertFalse(ok_result)
+        self.assertEqual("ENVIRONMENT_NOT_FOUND", result["code"])
+        self.assertEqual(1, len(client.calls))
+        self.assertEqual([], client.writes())
 
 
 class GlobalParamsSafetyTests(unittest.TestCase):
@@ -311,7 +478,9 @@ class SingleSwitchTests(unittest.TestCase):
             {"project_code": PROJECT, "workflow_code": WORKFLOW}
         )
         self.assertFalse(result_ok)
-        self.assertEqual("ENVIRONMENT_CODE_REQUIRED", result["code"])
+        self.assertEqual("ENVIRONMENT_REQUIRED", result["code"])
+        # Both spellings are named, so the error names both.
+        self.assertIn("environment_name", result["message"])
 
         client = FakeClient([])
         result_ok, result = client.update_workflow_environment(

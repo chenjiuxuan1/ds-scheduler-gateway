@@ -47,6 +47,7 @@ def dispatch_action(client: DolphinSchedulerClient, action: str, payload: Dict[s
         "delete_task": lambda: client.delete_task(payload),
         "dump_workflow_graph": lambda: client.dump_workflow_graph(payload),
         "list_datasources": lambda: client.list_datasources(payload),
+        "list_environments": lambda: client.list_environments(payload),
         "get_datasource": lambda: client.get_datasource(payload),
         "extract_task_runtime_config": lambda: client.extract_task_runtime_config(payload),
         "list_resources": lambda: client.list_resources(payload),

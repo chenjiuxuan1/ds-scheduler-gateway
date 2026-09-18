@@ -3993,6 +3993,130 @@ class DolphinSchedulerClient:
                 return text
         return text
 
+    # ------------------------------------------------------------------
+    # Environments.
+    #
+    # DS switches a workflow by numeric ``environmentCode``, but callers think
+    # in names ("环境换成 ds_develop").  The switch actions used to demand the
+    # code with no way to look it up, which is a dead end for anyone who is not
+    # reading the DS UI.  ``list_environments`` exposes the list, and the switch
+    # actions accept ``environment_name`` as an alternative to the code.
+    # ------------------------------------------------------------------
+
+    # The controller is spelled both ways across DS releases and the target
+    # instances are not all on one version, so probe rather than assume.  Both
+    # are read-only GETs, so a miss costs one request.
+    ENVIRONMENT_PATHS = ("/environments", "/environment")
+
+    def list_environments(self, payload: Dict[str, Any]) -> Tuple[bool, Any]:
+        """List DS environments (``code`` / ``name``), optionally filtered.
+
+        Payload:
+        - ``search_val``: optional name filter
+        - ``page_no`` (default 1) / ``page_size`` (default 100)
+        """
+        query = {
+            "pageNo": payload.get("page_no", 1),
+            "pageSize": payload.get("page_size", 100),
+            "searchVal": payload.get("search_val", ""),
+        }
+        last_error: Any = None
+        for path in self.ENVIRONMENT_PATHS:
+            ok, result = self.request("GET", path, query=query)
+            if ok:
+                data = result.get("data") if isinstance(result, dict) else None
+                if not isinstance(data, dict):
+                    data = {}
+                total_list = data.get("totalList")
+                if not isinstance(total_list, list):
+                    total_list = []
+                return True, {
+                    "endpoint": path,
+                    "total": data.get("total", len(total_list)),
+                    "totalList": [
+                        {
+                            "code": item.get("code"),
+                            "name": str(item.get("name") or "").strip(),
+                            "worker_groups": item.get("workerGroups"),
+                            "description": item.get("description"),
+                        }
+                        for item in total_list
+                        if isinstance(item, dict)
+                    ],
+                }
+            last_error = result
+            # Only "this path does not exist here" justifies trying the other
+            # spelling.  A real 401/403 must surface immediately, not be masked
+            # by a second request.
+            if not (isinstance(result, dict) and result.get("status") in (404, 405)):
+                return False, result
+        return False, last_error or {"message": "environment endpoint not found"}
+
+    def _resolve_target_environment_code(
+        self,
+        payload: Dict[str, Any],
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Return ``(environment_code, resolution, error)``.
+
+        An explicit ``environment_code`` wins.  Otherwise ``environment_name``
+        is resolved against the live environment list and must match **exactly
+        and uniquely**: DS stores ``environmentCode`` as an opaque string and
+        never validates it, so a wrong pick would be written silently and only
+        surface later as tasks running in the wrong environment.
+        """
+        explicit = str(payload.get("environment_code") or "").strip()
+        if explicit:
+            return explicit, {"source": "payload", "environment_code": explicit}, None
+
+        name = str(payload.get("environment_name") or "").strip()
+        if not name:
+            return None, None, {
+                "code": "ENVIRONMENT_REQUIRED",
+                "message": "environment_code or environment_name is required",
+            }
+
+        ok, result = self.list_environments({"search_val": name, "page_size": 200})
+        if not ok:
+            return None, None, {
+                "code": "ENVIRONMENT_LOOKUP_FAILED",
+                "message": "could not list DS environments to resolve environment_name",
+                "environment_name": name,
+                "detail": result,
+            }
+
+        found = result.get("totalList") or []
+        exact = [env for env in found if env.get("name") == name]
+        if not exact:
+            return None, None, {
+                "code": "ENVIRONMENT_NOT_FOUND",
+                "message": f"no DS environment named {name!r}",
+                "environment_name": name,
+                "available": [env.get("name") for env in found][:50],
+            }
+        if len(exact) > 1:
+            return None, None, {
+                "code": "ENVIRONMENT_NAME_AMBIGUOUS",
+                "message": f"{len(exact)} DS environments are named {name!r}",
+                "environment_name": name,
+                "candidates": [
+                    {"code": env.get("code"), "name": env.get("name")} for env in exact
+                ],
+            }
+
+        code = str(exact[0].get("code") or "").strip()
+        if not code:
+            return None, None, {
+                "code": "ENVIRONMENT_CODE_MISSING",
+                "message": f"DS returned no code for environment {name!r}",
+                "environment_name": name,
+            }
+        return code, {
+            "source": "resolved_from_name",
+            "environment_name": name,
+            "environment_code": code,
+            "endpoint": result.get("endpoint"),
+        }, None
+
     @staticmethod
     def _resolve_bool_field(
         payload: Dict[str, Any],
@@ -4096,12 +4220,11 @@ class DolphinSchedulerClient:
                 "code": "WORKFLOW_CODE_REQUIRED",
                 "message": "workflow_code is required",
             }
-        target_environment_code = str(payload.get("environment_code") or "").strip()
-        if not target_environment_code:
-            return False, {
-                "code": "ENVIRONMENT_CODE_REQUIRED",
-                "message": "environment_code is required",
-            }
+        target_environment_code, environment_resolution, env_error = (
+            self._resolve_target_environment_code(payload)
+        )
+        if env_error is not None:
+            return False, env_error
 
         flags: Dict[str, bool] = {}
         for field, default in (
@@ -4129,7 +4252,7 @@ class DolphinSchedulerClient:
                 "raw": workflow_result,
             }
 
-        return self._switch_workflow_environment(
+        switched, switch_result = self._switch_workflow_environment(
             project_code=project_code,
             workflow_code=workflow_code,
             detail=detail,
@@ -4140,6 +4263,11 @@ class DolphinSchedulerClient:
             auto_offline=flags["auto_offline"],
             require_global_params=flags["require_global_params"],
         )
+        # Surface how the code was obtained, so a name-resolved switch is
+        # auditable after the fact.
+        if switched and isinstance(switch_result, dict) and environment_resolution:
+            switch_result["environment_resolution"] = environment_resolution
+        return switched, switch_result
 
     def _switch_workflow_environment(
         self,
@@ -4845,12 +4973,11 @@ class DolphinSchedulerClient:
             if code not in workflow_codes:
                 workflow_codes.append(code)
 
-        target_environment_code = str(payload.get("environment_code") or "").strip()
-        if not target_environment_code:
-            return False, {
-                "code": "ENVIRONMENT_CODE_REQUIRED",
-                "message": "environment_code is required",
-            }
+        target_environment_code, environment_resolution, env_error = (
+            self._resolve_target_environment_code(payload)
+        )
+        if env_error is not None:
+            return False, env_error
 
         flags: Dict[str, bool] = {}
         for field, default in (
@@ -4994,6 +5121,7 @@ class DolphinSchedulerClient:
             "dry_run": flags["dry_run"],
             "project_code": project_code,
             "environment_code": target_environment_code,
+            "environment_resolution": environment_resolution,
             "include_schedule": flags["include_schedule"],
             "total": len(workflow_codes),
             "summary": summary,

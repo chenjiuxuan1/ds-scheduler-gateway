@@ -50,6 +50,7 @@ READ_ACTIONS = {
     "get_task_log",
     "check_failed_instances",
     "list_datasources",
+    "list_environments",
     "get_datasource",
     "extract_task_runtime_config",
     "list_resources",
