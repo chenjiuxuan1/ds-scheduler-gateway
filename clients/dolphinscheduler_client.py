@@ -23,6 +23,12 @@ from clients.schedule_alerts import (
 
 
 class DolphinSchedulerClient:
+    # Guard rails for the task-level retry settings applied through the
+    # ``update_task`` family. DolphinScheduler stores ``failRetryInterval`` in
+    # minutes, so the ceiling is 7 days.
+    MAX_TASK_FAIL_RETRY_TIMES = 1000
+    MAX_TASK_FAIL_RETRY_INTERVAL = 10080
+
     RISKY_WORKFLOW_VARIABLES = {
         "src",
         "db",
@@ -2902,10 +2908,18 @@ class DolphinSchedulerClient:
             }
 
         mutated_task, change_summary = self._build_updated_task_definition(target_task, payload)
+        if change_summary.get("error"):
+            return False, {
+                **change_summary["error"],
+                "workflow_code": workflow_code,
+                "task_name": str(target_task.get("name") or "").strip(),
+                "task_code": self._safe_int(target_task.get("code")),
+            }
         if not change_summary.get("changed_fields"):
             return False, {
                 "message": "nothing to update",
-                "hint": "provide sql/script/local_params/resource_list/task_params_patch/task_description/datasource/sql_type/etc.",
+                "hint": "provide sql/script/local_params/resource_list/task_params_patch/"
+                "task_description/datasource/sql_type/fail_retry_times/fail_retry_interval/etc.",
                 "task_name": str(target_task.get("name") or "").strip(),
                 "task_code": self._safe_int(target_task.get("code")),
             }
@@ -2995,6 +3009,8 @@ class DolphinSchedulerClient:
             "task_name": str(mutated_task.get("name") or "").strip(),
             "task_code": self._safe_int(mutated_task.get("code")),
             "task_type": str(mutated_task.get("taskType") or "").strip(),
+            "fail_retry_times": self._safe_int(mutated_task.get("failRetryTimes"), 0),
+            "fail_retry_interval": self._safe_int(mutated_task.get("failRetryInterval"), 1),
             "change_summary": change_summary,
             "original_release_state": original_release_state,
             "original_schedule_release_state": original_schedule_release_state,
@@ -3991,6 +4007,57 @@ class DolphinSchedulerClient:
                 "code": "INVALID_BOOLEAN_FIELD",
                 "message": f"{key} must be a boolean",
                 "field": key,
+            }
+        return True, value, None
+
+    @staticmethod
+    def _resolve_int_field(
+        payload: Dict[str, Any],
+        key: str,
+        *,
+        minimum: int = 0,
+        maximum: Optional[int] = None,
+        aliases: Tuple[str, ...] = (),
+    ) -> Tuple[bool, Optional[int], Optional[Dict[str, Any]]]:
+        """Read an optional integer field, rejecting wrong types loudly.
+
+        Returns ``(ok, value, error)``. ``value`` is ``None`` when the field was
+        not supplied at all, so callers can tell "leave unchanged" apart from
+        "set to 0". Booleans are rejected explicitly because ``True`` is an
+        ``int`` in Python and would otherwise silently become ``1``.
+        """
+        names = [name for name in (key, *aliases) if payload.get(name) not in (None, "")]
+        if not names:
+            return True, None, None
+        name = names[0]
+        raw = payload.get(name)
+        if isinstance(raw, bool):
+            value: Any = None
+        elif isinstance(raw, int):
+            value = raw
+        elif isinstance(raw, float) and raw.is_integer():
+            value = int(raw)
+        elif isinstance(raw, str):
+            try:
+                value = int(raw.strip())
+            except ValueError:
+                value = None
+        else:
+            value = None
+        if value is None:
+            return False, None, {
+                "code": "INVALID_INTEGER_FIELD",
+                "message": f"{name} must be an integer",
+                "field": name,
+                "value": raw,
+            }
+        if value < minimum or (maximum is not None and value > maximum):
+            bound = f">= {minimum}" if maximum is None else f"between {minimum} and {maximum}"
+            return False, None, {
+                "code": "INTEGER_FIELD_OUT_OF_RANGE",
+                "message": f"{name} must be {bound}",
+                "field": name,
+                "value": raw,
             }
         return True, value, None
 
@@ -6037,6 +6104,33 @@ class DolphinSchedulerClient:
         task["taskType"] = task_type
 
         changed_fields: list[str] = []
+
+        # Task-level retry settings. ``failRetryTimes`` / ``failRetryInterval``
+        # are siblings of ``taskType``/``timeout`` in the DS task definition, NOT
+        # keys inside ``taskParams``, so they are applied on ``task`` directly.
+        retry_times_ok, retry_times, retry_times_error = self._resolve_int_field(
+            payload,
+            "fail_retry_times",
+            maximum=self.MAX_TASK_FAIL_RETRY_TIMES,
+            aliases=("failRetryTimes",),
+        )
+        if not retry_times_ok:
+            return task, {"changed_fields": [], "error": retry_times_error}
+        retry_interval_ok, retry_interval, retry_interval_error = self._resolve_int_field(
+            payload,
+            "fail_retry_interval",
+            maximum=self.MAX_TASK_FAIL_RETRY_INTERVAL,
+            aliases=("failRetryInterval",),
+        )
+        if not retry_interval_ok:
+            return task, {"changed_fields": [], "error": retry_interval_error}
+        if retry_times is not None and retry_times != self._safe_int(task.get("failRetryTimes"), 0):
+            task["failRetryTimes"] = retry_times
+            changed_fields.append("fail_retry_times")
+        if retry_interval is not None and retry_interval != self._safe_int(task.get("failRetryInterval"), 1):
+            task["failRetryInterval"] = retry_interval
+            changed_fields.append("fail_retry_interval")
+
         if payload.get("task_name") not in ("", None):
             new_name = str(payload.get("task_name") or "").strip()
             if new_name and new_name != str(task.get("name") or "").strip():

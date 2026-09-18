@@ -109,6 +109,38 @@
 生产门禁固定为：精确查告警组 → 单国家单项目 dry-run → 单条正式更新 → `get_schedule` → rollback → 再次 `get_schedule`。恢复完全正确后才能扩大 dry-run，批量正式执行仍需用户明确批准。
 
 
+## 任务失败重试（`fail_retry_times` / `fail_retry_interval`）
+
+`update_task` / `update_sql_task` / `update_shell_task` 支持修改任务定义级的失败重试设置。
+
+DS 里这两个字段是 `taskType` / `timeout` 的**同级字段**，不在 `taskParams` 内：
+
+| 参数 | 含义 | 取值范围 |
+|---|---|---|
+| `fail_retry_times` | 失败重试次数（`failRetryTimes`） | 0–1000 |
+| `fail_retry_interval` | 重试间隔（`failRetryInterval`），**单位分钟** | 0–10080（7 天） |
+
+行为约定：
+
+- 两个参数都可选；**不传 = 保持原值不变**。
+- `0` 是有效值（表示不重试），不会被当成"未提供"。
+- 同时兼容 DS 原生驼峰写法 `failRetryTimes` / `failRetryInterval`；数字字符串（`"3"`）会被归一化为整数。
+- 校验在**任何 DS 调用之前**完成：`true` / `"abc"` / `1.5` 等类型错误返回
+  `INVALID_INTEGER_FIELD`，越界返回 `INTEGER_FIELD_OUT_OF_RANGE`，且不会产生任何写入。
+- 校验失败时整条请求拒绝，不会出现"一个字段合法另一个不合法却写了一半"。
+- 响应回显落到任务上的 `fail_retry_times` / `fail_retry_interval`，
+  `change_summary.changed_fields` 里列出实际变更的字段名。
+
+这一能力只改这两个字段，其余任务属性（脚本、数据源、`environmentCode`、同级别的任务）
+原样保留，已有测试逐字段比对确认。
+
+由于 `update_sql_task` / `update_shell_task` 的既有契约要求同时提供 `sql` / `script`，
+**只改重试时请用 `update_task`**（它只要求 `task_name` 或 `task_code`）。
+
+> `append_task` 的重试次数继承自 `template_task_name` 指定的模板任务，暂不支持在 append 时覆盖；
+> 需要的话先 append，再对该任务跑一次 `update_task`。
+
+
 ## 环境切换（`update_workflow_environment` / `batch_update_workflow_environment`）
 
 用于把工作流批量切到另一个 DS 环境（`environmentCode`，例如 `dim_feature_dic -ds_develop` 切环境）。
