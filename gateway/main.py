@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import Any, Dict
+
 from gateway.access import AccessController
+from gateway.diagnostics import humanize_ds_error
 from gateway.models import GatewayRequest
 from gateway.response import build_response
 from gateway.router import route_request
@@ -48,11 +51,20 @@ def execute_request(request: GatewayRequest):
     if isinstance(error_payload, dict):
         error_code = str(error_payload.get("code") or error_code)
         error_message = error_payload.get("message", error_payload)
+
+    error: Dict[str, Any] = {"code": error_code, "message": error_message}
+    # Translate opaque DS transport failures (401 / 403 / unreachable) into
+    # actionable guidance instead of leaving a bare "DS_API_ERROR 401", which
+    # reads like a gateway or routing bug but is almost always the token.
+    humanized = humanize_ds_error(request.country, error_payload, request.ds_token)
+    if humanized is not None:
+        error = humanized
+
     return build_response(
         False,
         request.country,
         request.action,
         request.request_id,
         data=debug_payload,
-        error={"code": error_code, "message": error_message},
+        error=error,
     )
